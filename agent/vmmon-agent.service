@@ -1,0 +1,26 @@
+[Unit]
+Description=VMMon Server Monitoring and Service Discovery Agent
+Documentation=https://github.com/gcp-vm-monitor
+After=network.target docker.service
+Wants=network.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/vmmon-agent
+ExecStart=/usr/bin/python3 /opt/vmmon-agent/vmmon_agent.py --config /etc/vmmon-agent/config.json
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=vmmon-agent
+Environment="PYTHONUNBUFFERED=1"
+
+# Minimal hardening that preserves full /proc, /var/run/docker.sock, and systemctl access
+ProtectControlGroups=true
+RestrictRealtime=true
+OOMScoreAdjust=-200
+
+[Install]
+WantedBy=multi-user.target

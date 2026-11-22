@@ -1,0 +1,72 @@
+{
+  "name": "vmmon",
+  "version": "0.1.0",
+  "description": "GCP VM & service monitor (desktop)",
+  "main": "./out/main/index.js",
+  "author": "Klind",
+  "private": true,
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "typecheck": "vue-tsc --noEmit -p tsconfig.web.json && tsc --noEmit -p tsconfig.node.json",
+    "dist": "electron-vite build && electron-builder --win --x64"
+  },
+  "build": {
+    "appId": "com.klind.vmmon",
+    "productName": "VMMon",
+    "electronDist": "node_modules/electron/dist",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "out/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../agent",
+        "to": "agent",
+        "filter": [
+          "vmmon_agent.py",
+          "install.sh",
+          "uninstall.sh",
+          "vmmon-agent.service"
+        ]
+      }
+    ],
+    "win": {
+      "signAndEditExecutable": false,
+      "target": [
+        "portable",
+        "nsis"
+      ]
+    },
+    "portable": {
+      "artifactName": "VMMon-Portable-${version}.exe"
+    },
+    "nsis": {
+      "artifactName": "VMMon-Setup-${version}.exe",
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true
+    }
+  },
+  "dependencies": {
+    "echarts": "^6.1.0",
+    "simple-icons": "^16.38.1",
+    "ssh2": "^1.17.0",
+    "vue": "^3.5.46"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "@types/ssh2": "^1.15.6",
+    "@vitejs/plugin-vue": "^6.0.11",
+    "electron": "^45.4.1",
+    "electron-builder": "^26.18.0",
+    "electron-vite": "^6.0.0",
+    "typescript": "^6.0.3",
+    "vite": "^8.3.8",
+    "vue-tsc": "^3.3.14"
+  }
+}
