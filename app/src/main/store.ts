@@ -46,13 +46,7 @@ function defaults(): StoreData {
       projectId: '',
       datasetId: 'billing_export',
       currency: 'USD',
-      creditGrants: [
-        {
-          id: 'default-trial',
-          name: 'GCP Free Trial 试用赠金',
-          totalAmount: 300
-        }
-      ],
+      creditGrants: [],
       autoRefreshMinutes: 30
     },
     billingSummary: null
@@ -119,7 +113,7 @@ class Store {
             ...d.billing,
             ...(raw.billing || {}),
             serviceAccountJson: decrypt(raw.billing?.serviceAccountJson),
-            creditGrants: raw.billing?.creditGrants?.length ? raw.billing.creditGrants : d.billing.creditGrants
+            creditGrants: (raw.billing?.creditGrants || []).filter((g) => g.id !== 'default-trial')
           },
           billingSummary: raw.billingSummary || null
         }

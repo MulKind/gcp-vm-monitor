@@ -1,6 +1,6 @@
 {
   "name": "vmmon",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "GCP VM & service monitor (desktop)",
   "main": "./out/main/index.js",
   "author": "Klind",

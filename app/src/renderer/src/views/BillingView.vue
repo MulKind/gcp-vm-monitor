@@ -91,6 +91,11 @@ async function enableDemo(): Promise<void> {
   }
 }
 
+function extractUrl(text: string): string | null {
+  const m = text.match(/https:\/\/[^\s）)]+/)
+  return m ? m[0] : null
+}
+
 function openConsoleBilling(): void {
   const acctId = bs.value?.account?.billingAccountId || cfg.value?.billingAccountId
   const url =
@@ -255,34 +260,53 @@ onBeforeUnmount(() => {
       <div v-for="(w, i) in bs.warnings" :key="i" class="warn-strip card">
         <span>ℹ️ {{ w }}</span>
         <button v-if="bs.mode === 'demo'" class="sm primary" @click="showConfig = true">配置真实 GCP 账户</button>
+        <button
+          v-else-if="extractUrl(w)"
+          class="sm"
+          @click="openGcpConsoleTab(extractUrl(w)!, '启用 GCP Cloud Billing API')"
+        >
+          🌐 内置浏览器打开并启用 API
+        </button>
       </div>
 
       <!-- 4 Top KPI Cards -->
       <div class="kpi-grid">
         <!-- Card 1: Remaining Promo / Trial Credit -->
-        <div class="kpi card highlight">
+        <div class="kpi card" :class="{ highlight: bs.totalCreditRemaining > 0 }">
           <div class="kl">
             <span>🎁 剩余可用赠金（含试用金）</span>
             <span v-if="daysUntilExpiry != null" class="badge" :style="{ color: daysUntilExpiry <= 14 ? 'var(--red)' : 'var(--cyan)' }">
               {{ daysUntilExpiry > 0 ? `剩余 ${daysUntilExpiry} 天到期` : '已到期' }}
             </span>
+            <span v-else-if="bs.consoleSyncedAt" class="badge" style="color: var(--green)">✓ 已从控制台同步</span>
           </div>
-          <div class="kv-big" :style="{ color: creditPctRemaining < 15 ? 'var(--red)' : 'var(--green)' }">
+          <div
+            class="kv-big"
+            :style="{
+              color: bs.totalCreditGranted <= 0 ? 'var(--muted)' : creditPctRemaining < 15 ? 'var(--red)' : 'var(--green)'
+            }"
+          >
             {{ money(bs.totalCreditRemaining) }}
           </div>
-          <div class="bar" style="height: 7px">
-            <i
-              :style="{
-                width: creditPctRemaining + '%',
-                background: creditPctRemaining < 15 ? 'var(--red)' : creditPctRemaining < 35 ? 'var(--yellow)' : 'var(--green)'
-              }"
-            />
-          </div>
-          <div class="ks muted">
-            已用 {{ money(bs.totalCreditUsed) }} / 总额 {{ money(bs.totalCreditGranted) }}
-            <template v-if="bs.estimatedRunwayDays != null">
-              · 按近7日消耗可撑 <b style="color: var(--text)">~{{ bs.estimatedRunwayDays }} 天</b>
-            </template>
+          <template v-if="bs.totalCreditGranted > 0">
+            <div class="bar" style="height: 7px">
+              <i
+                :style="{
+                  width: creditPctRemaining + '%',
+                  background: creditPctRemaining < 15 ? 'var(--red)' : creditPctRemaining < 35 ? 'var(--yellow)' : 'var(--green)'
+                }"
+              />
+            </div>
+            <div class="ks muted">
+              已用 {{ money(bs.totalCreditUsed) }} / 总额 {{ money(bs.totalCreditGranted) }}
+              <template v-if="bs.estimatedRunwayDays != null">
+                · 按近7日消耗可撑 <b style="color: var(--text)">~{{ bs.estimatedRunwayDays }} 天</b>
+              </template>
+            </div>
+          </template>
+          <div v-else class="ks muted">
+            当前账户无可用赠金 ·
+            <a style="color: var(--blue); cursor: pointer" @click="openConsoleCredits">打开 GCP 赠金页核实/同步 →</a>
           </div>
         </div>
 
@@ -290,8 +314,19 @@ onBeforeUnmount(() => {
         <div class="kpi card">
           <div class="kl">
             <span>🧾 {{ fmtYm(bs.invoiceMonth) }} 实际应付净额</span>
-            <span class="badge" :style="{ color: bs.monthNetCost <= 0.01 ? 'var(--green)' : 'var(--yellow)' }">
-              {{ bs.monthNetCost <= 0.01 ? '已被赠金全额抵扣' : '产生自付账单' }}
+            <span v-if="bs.tableEmpty" class="badge" style="color: var(--yellow)">⏳ 等待首批导出数据</span>
+            <span
+              v-else
+              class="badge"
+              :style="{ color: bs.monthNetCost <= 0.01 ? 'var(--green)' : 'var(--yellow)' }"
+            >
+              {{
+                bs.monthNetCost <= 0.01
+                  ? bs.monthPromoDeduction > 0
+                    ? '已被赠金全额抵扣'
+                    : '暂无应付费用'
+                  : '产生自付账单'
+              }}
             </span>
           </div>
           <div class="kv-big" :style="{ color: bs.monthNetCost > 0.01 ? 'var(--yellow)' : 'var(--text)' }">
@@ -346,7 +381,7 @@ onBeforeUnmount(() => {
             <button class="ghost sm" @click="showConfig = true">校准额度</button>
           </div>
 
-          <div class="grants-list">
+          <div v-if="bs.grantsBreakdown.length" class="grants-list">
             <div v-for="g in bs.grantsBreakdown" :key="g.id" class="grant-item">
               <div class="row">
                 <b class="grow ellipsis">{{ g.name }}</b>
@@ -365,6 +400,10 @@ onBeforeUnmount(() => {
                 <span v-if="g.expiresAt">到期 {{ g.expiresAt }}</span>
               </div>
             </div>
+          </div>
+          <div v-else class="dim" style="padding: 14px; background: #0b1222; border-radius: 10px; font-size: 12.5px; line-height: 1.6">
+            当前账户没有配置有效赠金（余额 {{ money(0) }}）。<br />
+            想从 Google 官方页面核实？点击右上角 <b>「🎁 内置浏览器查赠金页」</b>，打开页面后点顶部工具栏 <b>「📥 同步此页赠金余额」</b> 即可自动读取。
           </div>
 
           <div v-if="bs.discoveredCredits.length" style="margin-top: 14px">

@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
 import type {
   AgentInfo,
   AppSnapshot,
+  CreditGrant,
   GcpBillingConfig,
   GcpBillingSummary,
   GeneratedKey,
@@ -44,6 +45,11 @@ const api = {
   saveBilling: (cfg: GcpBillingConfig): Promise<{ config: GcpBillingConfig; summary: GcpBillingSummary | null }> =>
     ipcRenderer.invoke('billing:save', cfg),
   refreshBilling: (): Promise<GcpBillingSummary> => ipcRenderer.invoke('billing:refresh'),
+  syncConsoleCredits: (payload: {
+    grants: CreditGrant[]
+    currency?: string
+  }): Promise<{ config: GcpBillingConfig; summary: GcpBillingSummary | null }> =>
+    ipcRenderer.invoke('billing:syncConsole', payload),
 
   onStatus: (cb: (s: VmStatus) => void) => on<[VmStatus]>('vm:status', cb),
   onInfo: (cb: (id: string, info: AgentInfo) => void) => on<[string, AgentInfo]>('vm:info', cb),

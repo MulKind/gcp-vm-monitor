@@ -13,13 +13,11 @@ function cloneDefault(): GcpBillingConfig {
         projectId: '',
         datasetId: 'billing_export',
         currency: 'USD',
-        creditGrants: [{ id: 'trial-1', name: 'GCP Free Trial 试用赠金', totalAmount: 300 }],
+        creditGrants: [],
         autoRefreshMinutes: 30
       }
   if (base.mode === 'unconfigured') base.mode = 'bigquery'
-  if (!base.creditGrants?.length) {
-    base.creditGrants = [{ id: 'trial-1', name: 'GCP Free Trial 试用赠金', totalAmount: 300 }]
-  }
+  if (!base.creditGrants) base.creditGrants = []
   return base
 }
 
@@ -180,9 +178,9 @@ async function save(): Promise<void> {
           <div class="grants-box">
             <div class="row" style="margin-bottom: 8px">
               <div class="grow">
-                <b style="font-size: 13px">赠金池 / 账户额度配置（用于计算剩余赠金余额）</b>
+                <b style="font-size: 13px">赠金池 / 账户额度配置（无赠金请保持为空）</b>
                 <div class="dim" style="font-size: 11.5px">
-                  软件会自动从 BigQuery 累加所有已抵扣的 <span class="mono">PROMOTION</span> 赠金并从总额中扣减。若你是中途开启导出，可填「校准日当天剩余额度 + 校准日期」。
+                  GCP 的公开 API 不返回初始赠金钱包总额。若该账号<b>没有或已用完 $300 赠金</b>，请保持列表为空；若有赠金，可在此添加或用「内置浏览器查赠金页 → 同步此页赠金余额」自动读取。
                 </div>
               </div>
               <select v-model="f.currency" style="width: 90px" title="默认币种（查询真实账单后会自动同步账户币种）">
@@ -193,7 +191,12 @@ async function save(): Promise<void> {
                 <option value="EUR">EUR (€)</option>
                 <option value="JPY">JPY (¥)</option>
               </select>
+              <button v-if="f.creditGrants.length" class="sm danger" @click="f.creditGrants = []">清空为无赠金</button>
               <button class="sm" @click="addGrant">＋ 添加赠金</button>
+            </div>
+
+            <div v-if="!f.creditGrants.length" class="dim" style="padding: 8px 12px; background: #0c1426; border-radius: 8px; font-size: 12px">
+              当前未设置赠金（账户可用赠金按 0 计算）。
             </div>
 
             <div v-for="(g, i) in f.creditGrants" :key="g.id" class="grant-row card">

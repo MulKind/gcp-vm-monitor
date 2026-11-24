@@ -19,7 +19,7 @@ import { utils as sshUtils } from 'ssh2'
 import { store } from './store'
 import { manager } from './manager'
 import { billingManager } from './gcpBilling'
-import type { AppSnapshot, GcpBillingConfig, GeneratedKey, ServiceOverride, Settings, VmConfig } from '@shared/types'
+import type { AppSnapshot, CreditGrant, GcpBillingConfig, GeneratedKey, ServiceOverride, Settings, VmConfig } from '@shared/types'
 
 let win: BrowserWindow | null = null
 let tray: Tray | null = null
@@ -330,6 +330,12 @@ function registerIpc(): void {
     const summary = await billingManager.refresh()
     updateTrayMenu()
     return summary
+  })
+
+  ipcMain.handle('billing:syncConsole', async (_e, payload: { grants: CreditGrant[]; currency?: string }) => {
+    const res = await billingManager.syncConsoleCredits(payload)
+    updateTrayMenu()
+    return res
   })
 
   ipcMain.handle('dialog:pickJson', async () => {

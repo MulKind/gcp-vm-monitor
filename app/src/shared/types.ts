@@ -223,8 +223,10 @@ export interface GcpBillingConfig {
   billingAccountId?: string
   /** Fallback currency code before first query (auto-updated from BigQuery) */
   currency: string
-  /** Configured promotional / free trial credit grants */
+  /** Configured promotional / free trial credit grants (empty = $0 / no active grants) */
   creditGrants: CreditGrant[]
+  /** Timestamp when creditGrants were synced from GCP Console Credits page */
+  consoleSyncedAt?: number
   /** Optional monthly gross/net budget alert threshold */
   monthlyBudget?: number
   /** Auto-refresh interval in minutes (0 = manual only) */
@@ -246,6 +248,9 @@ export interface GcpBillingSummary {
   account: GcpBillingAccountInfo | null
   accounts: GcpBillingAccountInfo[]
   tableUsed?: string
+  /** True when the BigQuery export table exists but GCP has not written any rows yet */
+  tableEmpty?: boolean
+  consoleSyncedAt?: number
 
   // Current month totals
   monthGrossCost: number

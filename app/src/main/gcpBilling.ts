@@ -436,7 +436,8 @@ GROUP BY credit_name, credit_type, usage_date, inv_month, is_promo
     runBqQuery(token, projectId, sqlCredits)
   ])
 
-  if (recentRows.length === 0 && creditRows.length === 0) {
+  const tableEmpty = recentRows.length === 0 && creditRows.length === 0
+  if (tableEmpty) {
     warnings.push('BigQuery 账单导出表已连接成功，但表内暂时还没有账单记录（首次开启导出后通常需等待数小时写入数据）。')
   }
 
@@ -518,6 +519,7 @@ GROUP BY credit_name, credit_type, usage_date, inv_month, is_promo
   const discoveredCredits = [...credMap.values()].sort((a, b) => b.allTimeApplied - a.allTimeApplied)
 
   // Match configured CreditGrants against promo credit rows
+  const todayIso = new Date().toISOString().slice(0, 10)
   const promoRows = creditRows.filter((r) => Number(r.is_promo) === 1 && num(r.applied_amount) > 0)
   const grants = cfg.creditGrants || []
   const grantsBreakdown = grants.map((g: CreditGrant) => {
@@ -530,24 +532,28 @@ GROUP BY credit_name, credit_type, usage_date, inv_month, is_promo
       used += num(r.applied_amount)
     }
     const total = Math.max(0, Number(g.totalAmount) || 0)
-    const remaining = Math.max(0, total - used)
+    const isExpired = Boolean(g.expiresAt && g.expiresAt < todayIso)
+    const remaining = isExpired ? 0 : Math.max(0, total - used)
     return {
       id: g.id,
       name: g.name || '赠金',
       total,
-      used,
+      used: isExpired ? total : used,
       remaining,
       expiresAt: g.expiresAt || undefined
     }
   })
 
-  // If user configured no grants at all, still reflect total promo credits applied
   const totalCreditGranted = grantsBreakdown.reduce((s, g) => s + g.total, 0)
   const totalCreditUsed =
     grantsBreakdown.length > 0
       ? grantsBreakdown.reduce((s, g) => s + Math.min(g.total, g.used), 0)
       : promoRows.reduce((s, r) => s + num(r.applied_amount), 0)
   const totalCreditRemaining = Math.max(0, totalCreditGranted - totalCreditUsed)
+
+  if (monthNetCost > 0.05 && monthPromoDeduction < 0.01 && totalCreditRemaining > 0) {
+    warnings.push('检测到本月账单已产生实际应付净额且未触发赠金抵扣，你配置的赠金可能已过期或用尽，建议点击右上角「内置浏览器查赠金页」一键同步核实。')
+  }
 
   const expiries = grantsBreakdown
     .map((g) => g.expiresAt)
@@ -578,6 +584,8 @@ GROUP BY credit_name, credit_type, usage_date, inv_month, is_promo
     account: matchedAcct,
     accounts,
     tableUsed: `${projectId}.${datasetId}.${tableMeta.tableId}`,
+    tableEmpty,
+    consoleSyncedAt: cfg.consoleSyncedAt,
     monthGrossCost,
     monthPromoDeduction,
     monthOtherDiscounts,
@@ -786,6 +794,87 @@ class BillingManager extends EventEmitter {
     store.setBillingSummary(summary)
     this.emit('summary', summary)
     return summary
+  }
+
+  async syncConsoleCredits(payload: {
+    grants: CreditGrant[]
+    currency?: string
+  }): Promise<{ config: GcpBillingConfig; summary: GcpBillingSummary | null }> {
+    const now = Date.now()
+    const curCfg = store.billing
+    const updatedCfg: GcpBillingConfig = {
+      ...curCfg,
+      currency: (payload.currency || curCfg.currency || 'USD').toUpperCase(),
+      creditGrants: payload.grants,
+      consoleSyncedAt: now
+    }
+    store.setBilling(updatedCfg)
+
+    if (updatedCfg.mode === 'bigquery' && updatedCfg.serviceAccountJson) {
+      const summary = await this.refresh()
+      return { config: store.billing, summary }
+    }
+
+    // Even if BigQuery is not configured yet, construct/update a summary snapshot so the UI reflects synced credits
+    const prev = store.billingSummary
+    const grantsBreakdown = payload.grants.map((g) => ({
+      id: g.id,
+      name: g.name,
+      total: g.totalAmount,
+      used: 0,
+      remaining: g.totalAmount,
+      expiresAt: g.expiresAt
+    }))
+    const totalRemaining = grantsBreakdown.reduce((s, g) => s + g.remaining, 0)
+    const summary: GcpBillingSummary = prev
+      ? {
+          ...prev,
+          currency: updatedCfg.currency,
+          consoleSyncedAt: now,
+          totalCreditGranted: totalRemaining,
+          totalCreditUsed: 0,
+          totalCreditRemaining: totalRemaining,
+          grantsBreakdown
+        }
+      : {
+          fetchedAt: now,
+          mode: 'bigquery',
+          currency: updatedCfg.currency,
+          invoiceMonth: currentYearMonth(),
+          account: updatedCfg.billingAccountId
+            ? {
+                name: `billingAccounts/${updatedCfg.billingAccountId}`,
+                displayName: `结算账户 (${updatedCfg.billingAccountId})`,
+                open: true,
+                billingAccountId: updatedCfg.billingAccountId
+              }
+            : null,
+          accounts: [],
+          tableEmpty: true,
+          consoleSyncedAt: now,
+          monthGrossCost: 0,
+          monthPromoDeduction: 0,
+          monthOtherDiscounts: 0,
+          monthNetCost: 0,
+          prevMonthGrossCost: 0,
+          prevMonthNetCost: 0,
+          totalCreditGranted: totalRemaining,
+          totalCreditUsed: 0,
+          totalCreditRemaining: totalRemaining,
+          earliestExpiry: grantsBreakdown[0]?.expiresAt || null,
+          dailyBurnRate7d: 0,
+          estimatedRunwayDays: null,
+          grantsBreakdown,
+          discoveredCredits: [],
+          dailyTrend: [],
+          byService: [],
+          byProject: [],
+          topSkus: [],
+          warnings: ['赠金余额已从 GCP 控制台页面同步。配置 BigQuery 导出后可进一步查看每日账单与 SKU 明细。']
+        }
+    store.setBillingSummary(summary)
+    this.emit('summary', summary)
+    return { config: updatedCfg, summary }
   }
 }
 
