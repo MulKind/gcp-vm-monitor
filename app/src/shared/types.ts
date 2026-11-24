@@ -171,6 +171,8 @@ export interface AppSnapshot {
   statuses: VmStatus[]
   infos: Record<string, AgentInfo>
   services: Record<string, Service[]>
+  billingConfig: GcpBillingConfig
+  billingSummary: GcpBillingSummary | null
 }
 
 export interface OpenServiceResult {
@@ -189,4 +191,105 @@ export interface InstallLog {
 export interface GeneratedKey {
   privateKeyPath: string
   publicKey: string
+}
+
+// ---------- GCP Billing & Credits ----------
+
+export interface CreditGrant {
+  id: string
+  name: string
+  /** Initial total grant amount (or baseline remaining amount if baselineDate is set) */
+  totalAmount: number
+  /** Optional ISO date YYYY-MM-DD when this credit expires */
+  expiresAt?: string
+  /** Optional YYYY-MM-DD: only count BigQuery promo deductions on/after this date (for calibrating mid-trial) */
+  baselineDate?: string
+  /** Optional substring filter matching BigQuery credit name or ID */
+  creditFilter?: string
+}
+
+export interface GcpBillingConfig {
+  mode: 'unconfigured' | 'bigquery' | 'demo'
+  /** Service Account JSON key content (encrypted at rest in store) */
+  serviceAccountJson?: string
+  serviceAccountEmail?: string
+  /** GCP Project ID where the BigQuery dataset resides */
+  projectId: string
+  /** BigQuery Dataset ID containing gcp_billing_export_* table */
+  datasetId: string
+  /** Optional explicit BigQuery Table ID; auto-discovered when empty */
+  tableId?: string
+  /** Optional Billing Account ID (e.g. 01ABCD-234567-89EF01) */
+  billingAccountId?: string
+  /** Fallback currency code before first query (auto-updated from BigQuery) */
+  currency: string
+  /** Configured promotional / free trial credit grants */
+  creditGrants: CreditGrant[]
+  /** Optional monthly gross/net budget alert threshold */
+  monthlyBudget?: number
+  /** Auto-refresh interval in minutes (0 = manual only) */
+  autoRefreshMinutes: number
+}
+
+export interface GcpBillingAccountInfo {
+  name: string
+  displayName: string
+  open: boolean
+  billingAccountId: string
+}
+
+export interface GcpBillingSummary {
+  fetchedAt: number
+  mode: 'bigquery' | 'demo'
+  currency: string
+  invoiceMonth: string
+  account: GcpBillingAccountInfo | null
+  accounts: GcpBillingAccountInfo[]
+  tableUsed?: string
+
+  // Current month totals
+  monthGrossCost: number
+  monthPromoDeduction: number
+  monthOtherDiscounts: number
+  monthNetCost: number
+
+  // Previous month totals
+  prevMonthGrossCost: number
+  prevMonthNetCost: number
+
+  // Credits & balance (including free trial / promo credits)
+  totalCreditGranted: number
+  totalCreditUsed: number
+  totalCreditRemaining: number
+  earliestExpiry: string | null
+  dailyBurnRate7d: number
+  estimatedRunwayDays: number | null
+  grantsBreakdown: {
+    id: string
+    name: string
+    total: number
+    used: number
+    remaining: number
+    expiresAt?: string
+  }[]
+  discoveredCredits: {
+    name: string
+    type: string
+    allTimeApplied: number
+    monthApplied: number
+  }[]
+
+  // Breakdowns & charts
+  dailyTrend: { date: string; gross: number; promo: number; net: number }[]
+  byService: { service: string; gross: number; credits: number; net: number }[]
+  byProject: { project: string; gross: number; credits: number; net: number }[]
+  topSkus: {
+    service: string
+    sku: string
+    usageAmount: number
+    usageUnit: string
+    gross: number
+    net: number
+  }[]
+  warnings: string[]
 }

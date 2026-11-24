@@ -1,5 +1,14 @@
 import { reactive, computed, markRaw } from 'vue'
-import type { AgentInfo, Metrics, Service, Settings, VmConfig, VmStatus } from '@shared/types'
+import type {
+  AgentInfo,
+  GcpBillingConfig,
+  GcpBillingSummary,
+  Metrics,
+  Service,
+  Settings,
+  VmConfig,
+  VmStatus
+} from '@shared/types'
 
 export const HISTORY = 300 // points kept per VM (~5 min at 1s)
 
@@ -34,7 +43,9 @@ export const state = reactive({
   metrics: {} as Record<string, Metrics>,
   history: {} as Record<string, Sample[]>,
   services: {} as Record<string, Service[]>,
-  view: 'overview' as 'overview' | 'vm',
+  billingConfig: null as GcpBillingConfig | null,
+  billingSummary: null as GcpBillingSummary | null,
+  view: 'overview' as 'overview' | 'vm' | 'billing',
   selectedVm: null as string | null,
   tabs: [] as Tab[],
   activeTab: 'home' as string,
@@ -100,6 +111,30 @@ export function goHome(): void {
   state.activeTab = 'home'
 }
 
+export function openBilling(): void {
+  state.view = 'billing'
+  state.activeTab = 'home'
+}
+
+export function openGcpConsoleTab(url: string, title: string): void {
+  const existing = state.tabs.find((t) => t.partition === 'persist:gcp-console' && t.url === url)
+  if (existing) {
+    state.activeTab = existing.id
+    return
+  }
+  const tab: Tab = {
+    id: `t${Date.now()}${Math.random().toString(16).slice(2, 6)}`,
+    vmId: '',
+    svcId: null,
+    title,
+    url,
+    partition: 'persist:gcp-console',
+    kind: 'googlecloud'
+  }
+  state.tabs.push(tab)
+  state.activeTab = tab.id
+}
+
 export async function openServiceTab(vmId: string, svc: Service): Promise<void> {
   const existing = state.tabs.find((t) => t.vmId === vmId && t.svcId === svc.id)
   if (existing) {
@@ -151,6 +186,8 @@ export async function initStore(): Promise<void> {
   for (const s of snap.statuses) state.statuses[s.vmId] = s
   state.infos = snap.infos
   state.services = snap.services
+  state.billingConfig = snap.billingConfig
+  state.billingSummary = snap.billingSummary
   api.onStatus((s) => (state.statuses[s.vmId] = s))
   api.onInfo((id, info) => (state.infos[id] = info))
   api.onMetrics((id, m) => {
@@ -161,6 +198,12 @@ export async function initStore(): Promise<void> {
   api.onVmConfig((vm) => {
     const i = state.vms.findIndex((v) => v.id === vm.id)
     if (i >= 0) state.vms[i] = vm
+  })
+  api.onBillingSummary((s) => {
+    state.billingSummary = s
+  })
+  api.onNavBilling(() => {
+    openBilling()
   })
   api.onWebviewNewWindow(({ webContentsId, url }) => {
     const from = state.tabs.find((t) => t.wcId === webContentsId)

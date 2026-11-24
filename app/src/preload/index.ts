@@ -2,6 +2,8 @@ import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
 import type {
   AgentInfo,
   AppSnapshot,
+  GcpBillingConfig,
+  GcpBillingSummary,
   GeneratedKey,
   InstallLog,
   Metrics,
@@ -35,8 +37,13 @@ const api = {
     ipcRenderer.invoke('svc:override', vmId, svcId, ov),
   saveSettings: (s: Settings): Promise<Settings> => ipcRenderer.invoke('settings:save', s),
   pickKey: (): Promise<string | null> => ipcRenderer.invoke('dialog:pickKey'),
+  pickJson: (): Promise<{ path: string; content: string } | null> => ipcRenderer.invoke('dialog:pickJson'),
   generateKey: (username: string): Promise<GeneratedKey> => ipcRenderer.invoke('key:generate', username),
   openExternal: (url: string): Promise<void> => ipcRenderer.invoke('shell:open', url),
+
+  saveBilling: (cfg: GcpBillingConfig): Promise<{ config: GcpBillingConfig; summary: GcpBillingSummary | null }> =>
+    ipcRenderer.invoke('billing:save', cfg),
+  refreshBilling: (): Promise<GcpBillingSummary> => ipcRenderer.invoke('billing:refresh'),
 
   onStatus: (cb: (s: VmStatus) => void) => on<[VmStatus]>('vm:status', cb),
   onInfo: (cb: (id: string, info: AgentInfo) => void) => on<[string, AgentInfo]>('vm:info', cb),
@@ -44,6 +51,8 @@ const api = {
   onServices: (cb: (id: string, list: Service[]) => void) => on<[string, Service[]]>('vm:services', cb),
   onVmConfig: (cb: (vm: VmConfig) => void) => on<[VmConfig]>('vm:config', cb),
   onInstallLog: (cb: (l: InstallLog) => void) => on<[InstallLog]>('install:log', cb),
+  onBillingSummary: (cb: (s: GcpBillingSummary | null) => void) => on<[GcpBillingSummary | null]>('billing:summary', cb),
+  onNavBilling: (cb: () => void) => on<[]>('nav:billing', cb),
   onWebviewNewWindow: (cb: (p: { webContentsId: number; url: string }) => void) =>
     on<[{ webContentsId: number; url: string }]>('webview:new-window', cb)
 }

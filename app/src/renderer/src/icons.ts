@@ -6,7 +6,7 @@ import {
   siWordpress, siGunicorn, siFastapi, si1panel, siGitlab, siGhost, siSyncthing, siJellyfin, siPlex, siEmby,
   siHomeassistant, siAdguard, siPihole, siOpenvpn, siTailscale, siZerotier, siCoolify, siUmami, siMetabase,
   siKibana, siConsul, siVault, siImmich, siCloudflare, siSupabase, siMatomo, siGo, siRust, siDeno, siBun,
-  siDebian, siUbuntu, siLinux
+  siDebian, siUbuntu, siLinux, siGooglecloud
 } from 'simple-icons'
 
 export interface IconDef {
@@ -38,7 +38,7 @@ const MAP: Record<string, IconDef> = {
   zerotier: b(siZerotier), coolify: b(siCoolify), umami: b(siUmami, '#e5e7eb'), metabase: b(siMetabase), kibana: b(siKibana),
   consul: b(siConsul), vault: b(siVault, '#FFEC6E'), immich: b(siImmich), cloudflared: b(siCloudflare), supabase: b(siSupabase),
   matomo: b(siMatomo), go: b(siGo), rust: b(siRust, '#e5e7eb'), deno: b(siDeno, '#e5e7eb'), bun: b(siBun, '#fbf0df'),
-  debian: b(siDebian), ubuntu: b(siUbuntu), linux: b(siLinux, '#FCC624'),
+  debian: b(siDebian), ubuntu: b(siUbuntu), linux: b(siLinux, '#FCC624'), googlecloud: b(siGooglecloud), gcp: b(siGooglecloud),
   // no brand icons available → styled glyphs
   bt: t('宝', '#20a53a'), btpanel: t('宝', '#20a53a'), baota: t('宝', '#20a53a'),
   xui: t('X', '#6366f1'), '3xui': t('3X', '#6366f1'), v2ray: t('V2', '#7c3aed'), xray: t('Xr', '#7c3aed'), v2rayxray: t('Xr', '#7c3aed'),

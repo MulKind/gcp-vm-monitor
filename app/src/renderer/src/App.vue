@@ -1,14 +1,20 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { state, closeTab, goHome, vmById } from './store'
+import { state, closeTab, goHome, openBilling, vmById } from './store'
 import Overview from './views/Overview.vue'
 import VmDetail from './views/VmDetail.vue'
+import BillingView from './views/BillingView.vue'
 import BrowserTab from './components/BrowserTab.vue'
 import ServiceIcon from './components/ServiceIcon.vue'
 import SettingsDialog from './components/SettingsDialog.vue'
 
 const showSettings = ref(false)
-const homeTitle = computed(() => (state.view === 'vm' && state.selectedVm ? vmById(state.selectedVm)?.name || '仪表盘' : '仪表盘'))
+const homeTitle = computed(() => (state.view === 'vm' && state.selectedVm ? vmById(state.selectedVm)?.name || '虚拟机' : '虚拟机'))
+
+function clickVmNav(): void {
+  state.activeTab = 'home'
+  if (state.view === 'billing') state.view = 'overview'
+}
 
 function middleClose(e: MouseEvent, id: string): void {
   if (e.button === 1) closeTab(id)
@@ -23,8 +29,26 @@ function middleClose(e: MouseEvent, id: string): void {
         <b>VMMon</b>
       </div>
       <div class="tabs">
-        <div class="tab" :class="{ on: state.activeTab === 'home' }" @click="state.activeTab = 'home'" @dblclick="goHome">
-          <span class="ti">🏠</span><span class="ellipsis">{{ homeTitle }}</span>
+        <div
+          class="tab"
+          :class="{ on: state.activeTab === 'home' && state.view !== 'billing' }"
+          @click="clickVmNav"
+          @dblclick="goHome"
+        >
+          <span class="ti">🖥️</span><span class="ellipsis">{{ homeTitle }}</span>
+        </div>
+        <div
+          class="tab"
+          :class="{ on: state.activeTab === 'home' && state.view === 'billing' }"
+          @click="openBilling"
+        >
+          <span class="ti">💳</span>
+          <span class="ellipsis">
+            账单与赠金
+            <template v-if="state.billingSummary">
+              · {{ state.billingSummary.currency === 'USD' ? '$' : state.billingSummary.currency + ' ' }}{{ state.billingSummary.totalCreditRemaining.toFixed(0) }}
+            </template>
+          </span>
         </div>
         <div
           v-for="t in state.tabs"
@@ -46,6 +70,7 @@ function middleClose(e: MouseEvent, id: string): void {
     <main class="content">
       <section v-show="state.activeTab === 'home'" class="home">
         <Overview v-if="state.view === 'overview'" />
+        <BillingView v-else-if="state.view === 'billing'" />
         <VmDetail v-else-if="state.selectedVm" :key="state.selectedVm" :vm-id="state.selectedVm" />
       </section>
       <BrowserTab v-for="t in state.tabs" v-show="state.activeTab === t.id" :key="t.id" :tab="t" :active="state.activeTab === t.id" />

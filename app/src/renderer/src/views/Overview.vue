@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import type { VmConfig } from '@shared/types'
-import { state, healthCounts, refreshVms, errMsg, toast } from '../store'
+import { state, healthCounts, openBilling, refreshVms, errMsg, toast } from '../store'
 import VmCard from '../components/VmCard.vue'
 import VmDialog from '../components/VmDialog.vue'
 
@@ -74,6 +74,61 @@ async function addDemo(): Promise<void> {
       </div>
     </header>
 
+    <!-- GCP Billing & Credits Quick Strip -->
+    <div class="billing-strip card" @click="openBilling">
+      <template v-if="state.billingSummary">
+        <div class="bs-left">
+          <span class="bs-icon">💳</span>
+          <div>
+            <b>GCP 账单与赠金</b>
+            <span v-if="state.billingSummary.mode === 'demo'" class="badge demo" style="margin-left: 6px">演示</span>
+            <div class="muted" style="font-size: 12px">
+              {{ state.billingSummary.account?.displayName || 'GCP 结算账户' }}
+            </div>
+          </div>
+        </div>
+        <div class="bs-metrics">
+          <div>
+            <span class="muted">剩余可用赠金</span>
+            <b style="color: var(--green)">
+              {{ state.billingSummary.currency }} {{ state.billingSummary.totalCreditRemaining.toFixed(2) }}
+            </b>
+          </div>
+          <div>
+            <span class="muted">本月原始消耗</span>
+            <b style="color: #60a5fa">
+              {{ state.billingSummary.currency }} {{ state.billingSummary.monthGrossCost.toFixed(2) }}
+            </b>
+          </div>
+          <div>
+            <span class="muted">本月赠金抵扣</span>
+            <b style="color: var(--cyan)">
+              -{{ state.billingSummary.currency }} {{ state.billingSummary.monthPromoDeduction.toFixed(2) }}
+            </b>
+          </div>
+          <div>
+            <span class="muted">本月实际应付</span>
+            <b :style="{ color: state.billingSummary.monthNetCost > 0.01 ? 'var(--yellow)' : 'var(--text)' }">
+              {{ state.billingSummary.currency }} {{ state.billingSummary.monthNetCost.toFixed(2) }}
+            </b>
+          </div>
+        </div>
+        <button class="sm" @click.stop="openBilling">查看账单明细 →</button>
+      </template>
+      <template v-else>
+        <div class="bs-left">
+          <span class="bs-icon">💳</span>
+          <div>
+            <b>GCP 账单与赠金监控</b>
+            <div class="muted" style="font-size: 12px">
+              查看 GCP 账户试用赠金余额、本月出站流量费与每日账单消耗趋势
+            </div>
+          </div>
+        </div>
+        <button class="sm primary" @click.stop="openBilling">立即配置 / 查看 →</button>
+      </template>
+    </div>
+
     <div v-if="!state.vms.length" class="empty card">
       <div class="big">🖥️</div>
       <h2>还没有虚拟机</h2>
@@ -100,6 +155,14 @@ h1 { margin: 0 0 8px; font-size: 22px; font-weight: 600; }
 .kpis { display: flex; gap: 18px; color: var(--muted); font-size: 13px; align-items: center; }
 .kpis span { display: inline-flex; align-items: center; gap: 6px; }
 .kpis b { color: var(--text); }
+.billing-strip { padding: 12px 18px; margin-bottom: 18px; display: flex; align-items: center; justify-content: space-between; gap: 18px; cursor: pointer; transition: border-color .18s, background .18s; flex-wrap: wrap; border-color: #1f3356; background: linear-gradient(90deg, #0e1a32 0%, var(--panel) 65%); }
+.billing-strip:hover { border-color: #3b82f6; }
+.bs-left { display: flex; align-items: center; gap: 12px; }
+.bs-icon { font-size: 24px; }
+.bs-metrics { display: flex; gap: 28px; flex-wrap: wrap; }
+.bs-metrics > div { display: flex; flex-direction: column; gap: 2px; font-size: 12px; }
+.bs-metrics b { font-size: 15px; }
+.badge.demo { font-size: 10px; padding: 0 6px; color: var(--purple); border-color: #4c2a7a; }
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 16px; }
 .empty { padding: 60px 20px; text-align: center; max-width: 620px; margin: 60px auto; }
 .empty .big { font-size: 48px; }

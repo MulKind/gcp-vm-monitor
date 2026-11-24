@@ -12,13 +12,14 @@ import {
   type WebContents
 } from 'electron'
 import { join } from 'path'
-import { existsSync, mkdirSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { randomUUID } from 'crypto'
 import { deflateSync } from 'zlib'
 import { utils as sshUtils } from 'ssh2'
 import { store } from './store'
 import { manager } from './manager'
-import type { AppSnapshot, GeneratedKey, ServiceOverride, Settings, VmConfig } from '@shared/types'
+import { billingManager } from './gcpBilling'
+import type { AppSnapshot, GcpBillingConfig, GeneratedKey, ServiceOverride, Settings, VmConfig } from '@shared/types'
 
 let win: BrowserWindow | null = null
 let tray: Tray | null = null
@@ -148,13 +149,31 @@ function updateTrayMenu(): void {
   }))
 
   const onlineCount = manager.statuses().filter((s) => s.state === 'connected').length
-  tray.setToolTip(`VMMon · GCP 虚拟机监控 (${onlineCount}/${store.vms.length} 在线)`)
+  const bs = store.billingSummary
+  const billingLine = bs
+    ? `💳 剩余赠金: ${bs.currency} ${bs.totalCreditRemaining.toFixed(2)} · 本月净应付: ${bs.currency} ${bs.monthNetCost.toFixed(2)}`
+    : null
+  tray.setToolTip(
+    `VMMon · GCP 虚拟机监控 (${onlineCount}/${store.vms.length} 在线)` +
+      (bs ? `\n剩余赠金: ${bs.currency} ${bs.totalCreditRemaining.toFixed(2)}` : '')
+  )
 
   const menu = Menu.buildFromTemplate([
     {
       label: '打开 VMMon 主界面',
       click: () => showMainWindow()
     },
+    ...(billingLine
+      ? [
+          {
+            label: billingLine,
+            click: () => {
+              showMainWindow()
+              send('nav:billing')
+            }
+          } as MenuItemConstructorOptions
+        ]
+      : []),
     { type: 'separator' },
     ...(vmItems.length
       ? vmItems
@@ -296,8 +315,33 @@ function registerIpc(): void {
     settings: store.settings,
     statuses: manager.statuses(),
     infos: manager.infos(),
-    services: manager.servicesAll()
+    services: manager.servicesAll(),
+    billingConfig: store.billing,
+    billingSummary: store.billingSummary
   }))
+
+  ipcMain.handle('billing:save', async (_e, cfg: GcpBillingConfig) => {
+    const res = await billingManager.saveConfig(cfg)
+    updateTrayMenu()
+    return res
+  })
+
+  ipcMain.handle('billing:refresh', async () => {
+    const summary = await billingManager.refresh()
+    updateTrayMenu()
+    return summary
+  })
+
+  ipcMain.handle('dialog:pickJson', async () => {
+    const r = await dialog.showOpenDialog(win!, {
+      title: '选择 GCP 服务账号密钥 JSON 文件',
+      filters: [{ name: 'JSON Key', extensions: ['json'] }],
+      properties: ['openFile']
+    })
+    if (r.canceled || !r.filePaths[0]) return null
+    const content = readFileSync(r.filePaths[0], 'utf8')
+    return { path: r.filePaths[0], content }
+  })
 
   ipcMain.handle('vm:save', (_e, vm: VmConfig) => {
     if (!vm.id) vm.id = randomUUID()
@@ -379,6 +423,10 @@ function registerIpc(): void {
   manager.on('info', (id, info) => send('vm:info', id, info))
   manager.on('metrics', (id, m) => send('vm:metrics', id, m))
   manager.on('services', (id, list) => send('vm:services', id, list))
+  billingManager.on('summary', (s) => {
+    send('billing:summary', s)
+    updateTrayMenu()
+  })
 }
 
 const gotLock = app.requestSingleInstanceLock()
@@ -399,6 +447,7 @@ if (!gotLock) {
     registerIpc()
     createWindow()
     manager.init()
+    billingManager.init()
     app.on('activate', () => {
       showMainWindow()
     })

@@ -95,7 +95,7 @@ onMounted(() => {
       <button class="ghost icon" title="刷新" @click="reload">
         <span :class="{ spin: loading }">⟳</span>
       </button>
-      <button class="ghost sm" title="返回该 VM 详情" @click="openVm(tab.vmId)">🖥️ VM</button>
+      <button v-if="tab.vmId" class="ghost sm" title="返回该 VM 详情" @click="openVm(tab.vmId)">🖥️ VM</button>
       <form class="urlbar" @submit.prevent="go">
         <span class="lock" :title="addr.startsWith('http://127.0.0.1') || addr.startsWith('https://127.0.0.1') ? '通过 SSH 本地隧道安全转发' : ''">
           {{ addr.includes('127.0.0.1') ? '🔒 SSH隧道' : '🌐' }}

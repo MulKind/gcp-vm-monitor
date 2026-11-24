@@ -1,7 +1,7 @@
 import { app, safeStorage } from 'electron'
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'fs'
 import { join } from 'path'
-import type { Settings, VmConfig } from '@shared/types'
+import type { GcpBillingConfig, GcpBillingSummary, Settings, VmConfig } from '@shared/types'
 
 interface StoreData {
   version: 1
@@ -9,6 +9,8 @@ interface StoreData {
   vms: VmConfig[]
   /** stable local tunnel ports per service key so browser origins (and logins) persist */
   tunnelPorts: Record<string, number>
+  billing: GcpBillingConfig
+  billingSummary?: GcpBillingSummary | null
 }
 
 const SECRET_FIELDS = ['password', 'passphrase', 'agentToken'] as const
@@ -38,7 +40,22 @@ function defaults(): StoreData {
       servicesIntervalMs: 5000
     },
     vms: [],
-    tunnelPorts: {}
+    tunnelPorts: {},
+    billing: {
+      mode: 'unconfigured',
+      projectId: '',
+      datasetId: 'billing_export',
+      currency: 'USD',
+      creditGrants: [
+        {
+          id: 'default-trial',
+          name: 'GCP Free Trial 试用赠金',
+          totalAmount: 300
+        }
+      ],
+      autoRefreshMinutes: 30
+    },
+    billingSummary: null
   }
 }
 
@@ -97,7 +114,14 @@ class Store {
             for (const f of SECRET_FIELDS) out[f] = decrypt(vm[f])
             return out
           }),
-          tunnelPorts: raw.tunnelPorts || {}
+          tunnelPorts: raw.tunnelPorts || {},
+          billing: {
+            ...d.billing,
+            ...(raw.billing || {}),
+            serviceAccountJson: decrypt(raw.billing?.serviceAccountJson),
+            creditGrants: raw.billing?.creditGrants?.length ? raw.billing.creditGrants : d.billing.creditGrants
+          },
+          billingSummary: raw.billingSummary || null
         }
       } catch (e) {
         console.error('[store] failed to read config, using defaults', e)
@@ -112,7 +136,13 @@ class Store {
         const c: VmConfig = { ...vm }
         for (const f of SECRET_FIELDS) if (c[f]) c[f] = encrypt(c[f] as string)
         return c
-      })
+      }),
+      billing: {
+        ...this.data.billing,
+        serviceAccountJson: this.data.billing.serviceAccountJson
+          ? encrypt(this.data.billing.serviceAccountJson)
+          : undefined
+      }
     }
     const tmp = this.file + '.tmp'
     writeFileSync(tmp, JSON.stringify(out, null, 2), 'utf8')
@@ -169,6 +199,24 @@ class Store {
 
   usedTunnelPorts(): Set<number> {
     return new Set(Object.values(this.data.tunnelPorts))
+  }
+
+  get billing(): GcpBillingConfig {
+    return this.data.billing
+  }
+
+  setBilling(cfg: GcpBillingConfig): void {
+    this.data.billing = cfg
+    this.save()
+  }
+
+  get billingSummary(): GcpBillingSummary | null {
+    return this.data.billingSummary || null
+  }
+
+  setBillingSummary(summary: GcpBillingSummary | null): void {
+    this.data.billingSummary = summary
+    this.save()
   }
 }
 
