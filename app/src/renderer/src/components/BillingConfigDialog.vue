@@ -63,7 +63,9 @@ function removeGrant(idx: number): void {
 
 async function save(): Promise<void> {
   if (f.mode === 'bigquery') {
-    if (!f.serviceAccountJson) return toast('请先选择或粘贴 GCP 服务账号密钥 JSON', 'error')
+    if (!f.serviceAccountJson && !f.hasServiceAccountKey) {
+      return toast('请先选择或粘贴 GCP 服务账号密钥 JSON', 'error')
+    }
     if (!f.projectId.trim()) return toast('请填写 BigQuery 所在的 Project ID', 'error')
     if (!f.datasetId.trim()) return toast('请填写 BigQuery 账单导出的 Dataset 名称', 'error')
   }

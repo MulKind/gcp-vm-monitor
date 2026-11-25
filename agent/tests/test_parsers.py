@@ -369,6 +369,27 @@ class TestProcessAndCgroupParsers(unittest.TestCase):
         self.assertIsNone(docker_id2)
         self.assertEqual(unit2, "nginx.service")
 
+    def test_registry_port_image_matching_and_cache_pruning(self) -> None:
+        self.assertEqual(
+            vmmon_agent.strip_image_tag("localhost:5000/nginx:latest"),
+            "localhost:5000/nginx",
+        )
+        self.assertEqual(
+            vmmon_agent.strip_image_tag("harbor.local:8443/team/redis:7-alpine@sha256:deadbeef"),
+            "harbor.local:8443/team/redis",
+        )
+        self.assertEqual(
+            vmmon_agent.strip_image_tag("localhost:5000/grafana"),
+            "localhost:5000/grafana",
+        )
+        fp = vmmon_agent.match_fingerprint(image="localhost:5000/nginx:latest", ports=[8080])
+        self.assertTrue(fp["matched"])
+        self.assertEqual(fp["kind"], "nginx")
+
+        fp2 = vmmon_agent.match_fingerprint(image="registry.internal:5443/ops/portainer-ce:2.20", ports=[9443])
+        self.assertTrue(fp2["matched"])
+        self.assertEqual(fp2["kind"], "portainer")
+
 
 class TestConfigAndHTTPServer(unittest.TestCase):
     def test_config_creation_and_http_endpoints(self) -> None:

@@ -1,10 +1,10 @@
 import { EventEmitter } from 'events'
-import { app } from 'electron'
+import { app, session as electronSession } from 'electron'
 import { existsSync } from 'fs'
 import { join } from 'path'
 import { SshSession } from './ssh'
 import { AgentClient, AgentHttpError } from './agent'
-import { store } from './store'
+import { redactVm, store } from './store'
 import * as demo from './demo'
 import type {
   AgentInfo,
@@ -42,9 +42,10 @@ class VmRuntime {
   private stopped = true
   private timers: NodeJS.Timeout[] = []
   private retry: NodeJS.Timeout | null = null
+  private agentProbeTimer: NodeJS.Timeout | null = null
   private backoff = 3000
   private metricFails = 0
-  private busy = { m: false, s: false }
+  private busy = { m: false, s: false, attach: false }
 
   constructor(
     public vm: VmConfig,
@@ -78,6 +79,18 @@ class VmRuntime {
   private clearTimers(): void {
     this.timers.forEach((t) => clearInterval(t))
     this.timers = []
+    if (this.agentProbeTimer) {
+      clearInterval(this.agentProbeTimer)
+      this.agentProbeTimer = null
+    }
+  }
+
+  private scheduleAgentProbe(): void {
+    if (this.stopped || this.agentProbeTimer) return
+    this.agentProbeTimer = setInterval(() => {
+      if (this.stopped || !this.session?.connected || this.status.state === 'connected') return
+      void this.attachAgent()
+    }, 15000)
   }
 
   private scheduleReconnect(): void {
@@ -110,10 +123,21 @@ class VmRuntime {
     this.setStatus('connecting')
     const session = new SshSession(this.vm)
     try {
-      await session.connect(store.settings.proxy)
+      await session.connect(store.settings.proxy, {
+        allowDirectFallback: store.settings.allowDirectFallback,
+        onPinFingerprint: (fp) => {
+          const updated = store.patchVm(this.vm.id, { hostFingerprint: fp })
+          if (updated) {
+            this.vm = updated
+            this.mgr.emit('vm-updated', redactVm(updated))
+          }
+        }
+      })
     } catch (e) {
       this.setStatus('error', 'SSH 连接失败: ' + (e as Error).message)
-      this.scheduleReconnect()
+      if (!/主机公钥指纹不匹配/i.test((e as Error).message)) {
+        this.scheduleReconnect()
+      }
       return
     }
     if (this.stopped) {
@@ -137,7 +161,8 @@ class VmRuntime {
   /** Open tunnel to the agent and verify it; sets no-agent state when missing. */
   async attachAgent(): Promise<void> {
     const session = this.session
-    if (!session) return
+    if (!session || this.busy.attach) return
+    this.busy.attach = true
     try {
       if (!this.vm.agentToken) {
         const tok = await this.readRemoteToken()
@@ -145,6 +170,7 @@ class VmRuntime {
       }
       if (!this.vm.agentToken) {
         this.setStatus('no-agent', 'VM 上未检测到 VMMon Agent，请点击“安装 Agent”')
+        this.scheduleAgentProbe()
         return
       }
       const t = await session.openTunnel('agent', '127.0.0.1', this.vm.agentPort || 9527)
@@ -170,6 +196,9 @@ class VmRuntime {
       const msg = (e as Error).message || String(e)
       const missing = /ECONNRESET|socket hang up|Connection refused|ECONNREFUSED|Channel open failure/i.test(msg)
       this.setStatus('no-agent', missing ? 'Agent 未运行（端口无响应），请安装或重启 Agent' : 'Agent 错误: ' + msg)
+      this.scheduleAgentProbe()
+    } finally {
+      this.busy.attach = false
     }
   }
 
@@ -276,26 +305,49 @@ export class VmManager extends EventEmitter {
     return o
   }
 
-  saveVm(vm: VmConfig): void {
-    const old = store.getVm(vm.id)
-    store.upsertVm(vm)
-    const rt = this.rts.get(vm.id)
+  saveVm(vm: VmConfig): VmConfig {
+    const old = store.getVm(vm.id) ? { ...store.getVm(vm.id)! } : undefined
+    const saved = store.upsertVm(vm)
+    const rt = this.rts.get(saved.id)
     const connChanged =
       !old ||
-      ['host', 'port', 'username', 'authType', 'privateKeyPath', 'passphrase', 'password', 'agentPort', 'agentToken', 'kind'].some(
-        (k) => (old as unknown as Record<string, unknown>)[k] !== (vm as unknown as Record<string, unknown>)[k]
-      )
+      [
+        'host',
+        'port',
+        'username',
+        'authType',
+        'privateKeyPath',
+        'passphrase',
+        'password',
+        'hostFingerprint',
+        'agentPort',
+        'agentToken',
+        'kind'
+      ].some((k) => (old as unknown as Record<string, unknown>)[k] !== (saved as unknown as Record<string, unknown>)[k])
     if (rt) {
-      rt.vm = vm
+      rt.vm = saved
       if (connChanged) {
         rt.stop()
         rt.start()
       }
-    } else this.ensure(vm).start()
+    } else this.ensure(saved).start()
+    return redactVm(saved)
   }
 
   deleteVm(id: string): void {
-    this.rts.get(id)?.stop()
+    const rt = this.rts.get(id)
+    const svcIds = new Set<string>([
+      ...(rt?.services.map((s) => s.id) || []),
+      ...Object.keys(rt?.vm.serviceOverrides || {})
+    ])
+    for (const p of store.tunnelPortsForVm(id)) {
+      this.trustedOrigins.delete(`127.0.0.1:${p}`)
+    }
+    for (const svcId of svcIds) {
+      const part = partitionFor(id, svcId)
+      void electronSession.fromPartition(part).clearStorageData().catch(() => {})
+    }
+    rt?.stop()
     this.rts.delete(id)
     store.deleteVm(id)
   }
@@ -361,7 +413,18 @@ export class VmManager extends EventEmitter {
     const title = ov.displayName || svc.display_name || svc.name
     const partition = partitionFor(vmId, svcId)
 
-    if (ov.openMode === 'url' && ov.externalUrl) return { url: ov.externalUrl, partition, title }
+    if (ov.openMode === 'url' && ov.externalUrl) {
+      let parsed: URL
+      try {
+        parsed = new URL(ov.externalUrl)
+      } catch {
+        throw new Error('外部 URL 格式不合法')
+      }
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        throw new Error('外部 URL 仅允许 http:// 或 https:// 协议')
+      }
+      return { url: parsed.toString(), partition, title }
+    }
 
     const scheme = ov.scheme || svc.web?.scheme || 'http'
     const port = ov.port || svc.web?.port || svc.ports[0]?.host_port || svc.ports[0]?.port
@@ -398,29 +461,41 @@ export class VmManager extends EventEmitter {
     const dir = agentDir()
     for (const f of AGENT_FILES) if (!existsSync(join(dir, f))) throw new Error(`缺少 Agent 文件: ${join(dir, f)}`)
     log(`本地 Agent 目录: ${dir}`)
-    await s.exec('mkdir -p /tmp/vmmon-install', { timeoutMs: 15000 })
-    for (const f of AGENT_FILES) {
-      log(`上传 ${f} …`)
-      await s.upload(join(dir, f), `/tmp/vmmon-install/${f}`)
+    const mk = await s.exec('umask 077 && mktemp -d /tmp/vmmon.XXXXXXXXXX', { timeoutMs: 15000 })
+    const tmpDir = mk.stdout.trim().split(/\r?\n/).pop()?.trim() || ''
+    if (mk.code !== 0 || !/^\/tmp\/vmmon\.[A-Za-z0-9_-]{6,}$/.test(tmpDir)) {
+      throw new Error(`无法在远端创建安全临时目录: ${mk.stderr || mk.stdout}`)
     }
-    log('执行安装脚本（sudo）…')
-    let token = ''
-    const r = await s.exec('sudo -n sh /tmp/vmmon-install/install.sh /tmp/vmmon-install/vmmon_agent.py 2>&1', {
-      timeoutMs: 180000,
-      onLine: (l) => {
-        const m = /^VMMON_TOKEN=([0-9a-fA-F]+)\s*$/.exec(l.trim())
-        if (m) token = m[1]
-        else if (l.trim()) log(l)
+    try {
+      for (const f of AGENT_FILES) {
+        log(`上传 ${f} …`)
+        await s.upload(join(dir, f), `${tmpDir}/${f}`)
       }
-    })
-    if (r.code !== 0 || !token) {
-      if (/password is required|a terminal is required/i.test(r.stdout + r.stderr))
-        throw new Error('当前用户需要 sudo 密码。请使用有免密 sudo 的账号（GCP 默认账号均有），或手动执行 agent/install.sh')
-      throw new Error(`安装失败（退出码 ${r.code}）`)
+      log('执行安装脚本（sudo）…')
+      let token = ''
+      const r = await s.exec(`sudo -n sh '${tmpDir}/install.sh' '${tmpDir}/vmmon_agent.py' 2>&1`, {
+        timeoutMs: 180000,
+        onLine: (l) => {
+          const m = /^VMMON_TOKEN=([0-9a-fA-F]+)\s*$/.exec(l.trim())
+          if (m) token = m[1]
+          else if (l.trim()) log(l)
+        }
+      })
+      if (r.code !== 0 || !token) {
+        if (/password is required|a terminal is required/i.test(r.stdout + r.stderr))
+          throw new Error('当前用户需要 sudo 密码。请使用有免密 sudo 的账号（GCP 默认账号均有），或手动执行 agent/install.sh')
+        throw new Error(`安装失败（退出码 ${r.code}）`)
+      }
+      log('安装成功，Token 已保存')
+      const updated = store.patchVm(vmId, { agentToken: token })
+      if (updated) {
+        rt.vm = updated
+        this.emit('vm-updated', redactVm(updated))
+      }
+      await rt.attachAgent()
+    } finally {
+      await s.exec(`rm -rf '${tmpDir}'`, { timeoutMs: 10000 }).catch(() => {})
     }
-    log('安装成功，Token 已保存')
-    rt.vm = store.patchVm(vmId, { agentToken: token }) || rt.vm
-    await rt.attachAgent()
   }
 }
 

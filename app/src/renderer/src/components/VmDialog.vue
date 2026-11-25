@@ -125,7 +125,11 @@ async function save(): Promise<void> {
             </div>
             <div>
               <label>私钥密码（可选）</label>
-              <input v-model="f.passphrase" type="password" />
+              <input
+                v-model="f.passphrase"
+                type="password"
+                :placeholder="f.hasPassphrase ? '已加密保存（留空保持不变）' : ''"
+              />
             </div>
             <div v-if="pubKey" class="pub">
               <div class="row" style="margin-bottom: 6px">
@@ -141,7 +145,11 @@ async function save(): Promise<void> {
           </template>
           <div v-else-if="f.authType === 'password'">
             <label>密码</label>
-            <input v-model="f.password" type="password" />
+            <input
+              v-model="f.password"
+              type="password"
+              :placeholder="f.hasPassword ? '已加密保存（留空保持不变）' : ''"
+            />
             <div class="dim" style="font-size: 12px; margin-top: 4px">GCP 默认禁用密码登录，推荐使用密钥</div>
           </div>
           <div v-else class="dim" style="font-size: 12px">使用 Windows OpenSSH Authentication Agent 中已加载的密钥</div>
@@ -154,7 +162,23 @@ async function save(): Promise<void> {
             </div>
             <div>
               <label>Agent Token（自动获取，可留空）</label>
-              <input v-model="f.agentToken" class="mono" type="password" />
+              <input
+                v-model="f.agentToken"
+                class="mono"
+                type="password"
+                :placeholder="f.hasAgentToken ? '已加密保存（留空保持不变）' : ''"
+              />
+            </div>
+            <div style="grid-column: 1 / -1">
+              <label>已固定的 SSH 主机指纹 (TOFU 防中间人校验)</label>
+              <div class="row">
+                <input
+                  :value="f.hostFingerprint || '（首次连接时自动绑定服务器 SHA-256 指纹）'"
+                  readonly
+                  class="mono grow muted"
+                />
+                <button v-if="f.hostFingerprint" class="sm danger" @click="f.hostFingerprint = ''">重置指纹</button>
+              </div>
             </div>
             <div>
               <label>GCP 项目（可选）</label>

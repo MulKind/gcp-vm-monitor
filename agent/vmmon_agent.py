@@ -1233,6 +1233,21 @@ def _resolve_web_for_fingerprint(
     return {"port": port_pairs[0][1], "scheme": scheme, "path": path}
 
 
+def strip_image_tag(image: str) -> str:
+    """
+    Strip @digest and :tag from a container image reference without truncating
+    registry host:port prefixes (e.g. 'localhost:5000/nginx:latest' -> 'localhost:5000/nginx').
+    """
+    if not image:
+        return ""
+    no_digest = image.split("@", 1)[0].strip()
+    slash_idx = no_digest.rfind("/")
+    colon_idx = no_digest.rfind(":")
+    if colon_idx > slash_idx:
+        no_digest = no_digest[:colon_idx]
+    return no_digest.strip()
+
+
 def match_fingerprint(
     image: Optional[str] = None,
     unit: Optional[str] = None,
@@ -1257,10 +1272,8 @@ def match_fingerprint(
         "web": Optional[{"port": int, "scheme": str, "path": str}],
       }
     """
-    # Strip tag/digest from image for cleaner matching
-    img_clean = ""
-    if image:
-        img_clean = image.split("@")[0].split(":")[0].strip().lower()
+    # Strip tag/digest from image while preserving registry:port/ prefixes
+    img_clean = strip_image_tag(image).lower() if image else ""
 
     unit_clean = ""
     if unit:
@@ -2280,7 +2293,7 @@ class AgentState:
                 continue
 
         with self.lock:
-            self._docker_stats_cache.update(updated)
+            self._docker_stats_cache = updated
 
     # -----------------------------------------------------------------
     # Service Discovery Loop
@@ -2512,8 +2525,16 @@ class AgentState:
             services.append(svc)
             lookup[svc["id"]] = svc
 
-        # Attach cached health check & probed web info and compute health classification
+        # Attach cached health check & probed web info, prune stale cache keys, and compute health
+        active_sids = {svc["id"] for svc in services}
         with self.lock:
+            stale_hc = [k for k in self._health_check_cache if k not in active_sids]
+            for k in stale_hc:
+                del self._health_check_cache[k]
+            stale_pw = [k for k in self._probed_web_cache if k[0] not in active_sids]
+            for k in stale_pw:
+                del self._probed_web_cache[k]
+
             for svc in services:
                 sid = svc["id"]
                 if svc["web"] is None and svc["ports"]:
@@ -3096,10 +3117,15 @@ class AgentState:
                 if hp > 0:
                     new_checks[sid] = probe_tcp_port(hp, timeout=3.0)
 
-        # Merge results back into live cache without blocking discovery
+        # Merge results back into live cache without blocking discovery (only for still-existing services)
         with self.lock:
-            self._probed_web_cache.update(new_probed_web)
-            self._health_check_cache.update(new_checks)
+            live_sids = {s["id"] for s in self._services_cache.get("services", [])}
+            for k, v in new_probed_web.items():
+                if k[0] in live_sids:
+                    self._probed_web_cache[k] = v
+            for k, v in new_checks.items():
+                if k in live_sids:
+                    self._health_check_cache[k] = v
 
             for svc in self._services_cache.get("services", []):
                 sid = svc["id"]

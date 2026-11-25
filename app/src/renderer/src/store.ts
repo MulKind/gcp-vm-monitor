@@ -161,6 +161,12 @@ export async function openServiceTab(vmId: string, svc: Service): Promise<void> 
 }
 
 export function openUrlTab(from: Tab, url: string): void {
+  try {
+    const parsed = new URL(url)
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return
+  } catch {
+    return
+  }
   const tab: Tab = { ...from, id: `t${Date.now()}`, url, title: url.replace(/^https?:\/\//, '').slice(0, 40), wcId: undefined }
   state.tabs.push(tab)
   state.activeTab = tab.id

@@ -57,6 +57,7 @@ async function syncGcpCredits(): Promise<void> {
   try {
     interface ParsedPage {
       ready: boolean
+      wrongOrigin?: boolean
       noCreditsText: boolean
       currency: string
       expiredCount: number
@@ -64,6 +65,9 @@ async function syncGcpCredits(): Promise<void> {
     }
 
     const parsed = await el.executeJavaScript<ParsedPage>(`(() => {
+      if (location.origin !== 'https://console.cloud.google.com' || !/\\/credits(\\b|\\/|\\?|$)/i.test(location.pathname)) {
+        return { ready: false, wrongOrigin: true, noCreditsText: false, currency: '', expiredCount: 0, grants: [] };
+      }
       const bodyText = (document.body?.innerText || '').trim();
       if (!bodyText || bodyText.length < 30) return { ready: false, noCreditsText: false, currency: '', expiredCount: 0, grants: [] };
 
@@ -142,6 +146,10 @@ async function syncGcpCredits(): Promise<void> {
       };
     })()`)
 
+    if (parsed.wrongOrigin || !/\/credits(\b|\/|\?|$)/i.test(el.getURL())) {
+      toast('同步期间页面发生了跳转，请停留在「赠金 (Credits)」页面后重试', 'error')
+      return
+    }
     if (!parsed.ready) {
       toast('页面仍在加载中，请稍候再试', 'info')
       return

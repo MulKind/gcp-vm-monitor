@@ -4,6 +4,7 @@ import { createSign } from 'crypto'
 import { EventEmitter } from 'events'
 import { proxySocket } from './ssh'
 import { store } from './store'
+import { allocateCreditsWaterfall, extractAccountIdFromTable, selectBillingExportTable } from './coreLogic'
 import type {
   CreditGrant,
   GcpBillingAccountInfo,
@@ -42,19 +43,34 @@ function rawHttpsRequest(
       _options: unknown,
       cb: (err: Error | null, sock?: tls.TLSSocket) => void
     ): void => {
+      let settled = false
+      const finish = (err: Error | null, sock?: tls.TLSSocket): void => {
+        if (settled) return
+        settled = true
+        cb(err, sock)
+      }
       proxySocket(proxy, u.hostname, port, timeoutMs)
         .then((rawSock) => {
           const tlsSock = tls.connect({
             socket: rawSock,
             servername: u.hostname
           })
-          tlsSock.once('secureConnect', () => cb(null, tlsSock))
-          tlsSock.once('error', (e) => {
+          const hsTimer = setTimeout(() => {
+            tlsSock.destroy()
             rawSock.destroy()
-            cb(e)
+            finish(new Error(`TLS 握手超时: ${u.hostname}:${port}`))
+          }, Math.min(timeoutMs, 15000))
+          tlsSock.once('secureConnect', () => {
+            clearTimeout(hsTimer)
+            finish(null, tlsSock)
+          })
+          tlsSock.once('error', (e) => {
+            clearTimeout(hsTimer)
+            rawSock.destroy()
+            finish(e)
           })
         })
-        .catch((e) => cb(e as Error))
+        .catch((e) => finish(e as Error))
     }
 
     const bodyBuf = opts.body ? Buffer.from(opts.body, 'utf8') : undefined
@@ -76,6 +92,7 @@ function rawHttpsRequest(
       (res) => {
         const chunks: Buffer[] = []
         res.on('data', (c: Buffer) => chunks.push(c))
+        res.on('error', reject)
         res.on('end', () => {
           const text = Buffer.concat(chunks).toString('utf8')
           let json: unknown = null
@@ -101,7 +118,9 @@ async function httpsWithFallback(
   opts: { method?: 'GET' | 'POST'; headers?: Record<string, string>; body?: string; timeoutMs?: number }
 ): Promise<HttpResponse> {
   const proxy = store.settings.proxy
-  const attempts: ProxySettings[] = proxy.type !== 'none' ? [proxy, { ...proxy, type: 'none' }] : [proxy]
+  const allowFallback = store.settings.allowDirectFallback
+  const attempts: ProxySettings[] =
+    proxy.type !== 'none' && allowFallback ? [proxy, { ...proxy, type: 'none' }] : [proxy]
   let lastErr: Error | null = null
   for (const p of attempts) {
     try {
@@ -182,21 +201,36 @@ async function getAccessToken(sa: ServiceAccountKey): Promise<string> {
 
 async function fetchBillingAccounts(token: string, warnings: string[]): Promise<GcpBillingAccountInfo[]> {
   try {
-    const res = await httpsWithFallback('https://cloudbilling.googleapis.com/v1/billingAccounts', {
-      headers: { Authorization: `Bearer ${token}` }
-    })
-    if (res.status >= 400) {
-      const msg = (res.json as { error?: { message?: string } } | null)?.error?.message || `HTTP ${res.status}`
-      warnings.push(`Cloud Billing API 未返回账户列表（${msg}），已仅通过 BigQuery 账单导出表统计。`)
-      return []
+    const out: GcpBillingAccountInfo[] = []
+    let pageToken = ''
+    for (let guard = 0; guard < 20; guard++) {
+      const url =
+        'https://cloudbilling.googleapis.com/v1/billingAccounts?pageSize=100' +
+        (pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : '')
+      const res = await httpsWithFallback(url, {
+        headers: { Authorization: `Bearer ${token}` }
+      })
+      if (res.status >= 400) {
+        const msg = (res.json as { error?: { message?: string } } | null)?.error?.message || `HTTP ${res.status}`
+        warnings.push(`Cloud Billing API 未返回账户列表（${msg}），已仅通过 BigQuery 账单导出表统计。`)
+        return out
+      }
+      const payload = res.json as {
+        billingAccounts?: { name: string; displayName: string; open: boolean }[]
+        nextPageToken?: string
+      } | null
+      for (const a of payload?.billingAccounts || []) {
+        out.push({
+          name: a.name,
+          displayName: a.displayName || a.name,
+          open: Boolean(a.open),
+          billingAccountId: a.name.replace(/^billingAccounts\//, '')
+        })
+      }
+      if (!payload?.nextPageToken) break
+      pageToken = payload.nextPageToken
     }
-    const list = (res.json as { billingAccounts?: { name: string; displayName: string; open: boolean }[] } | null)?.billingAccounts || []
-    return list.map((a) => ({
-      name: a.name,
-      displayName: a.displayName || a.name,
-      open: Boolean(a.open),
-      billingAccountId: a.name.replace(/^billingAccounts\//, '')
-    }))
+    return out
   } catch (e) {
     warnings.push(`读取结算账户信息失败: ${(e as Error).message}`)
     return []
@@ -225,40 +259,35 @@ async function discoverBillingTable(
   explicitTableId?: string,
   preferredBillingId?: string
 ): Promise<BqTableMeta> {
-  let tableId = explicitTableId?.trim() || ''
+  let allTables: string[] = []
 
-  if (!tableId) {
-    const listUrl = `https://bigquery.googleapis.com/bigquery/v2/projects/${encodeURIComponent(projectId)}/datasets/${encodeURIComponent(datasetId)}/tables?maxResults=200`
-    const res = await httpsWithFallback(listUrl, { headers: { Authorization: `Bearer ${token}` } })
-    if (res.status === 404) {
-      throw new Error(`未找到 BigQuery 数据集 "${projectId}.${datasetId}"，请确认已在 GCP 结算导出中创建该数据集`)
-    }
-    if (res.status >= 400) {
-      const msg = (res.json as { error?: { message?: string } } | null)?.error?.message || res.text.slice(0, 200)
-      throw new Error(`访问 BigQuery 数据集失败 (${res.status}): ${msg}`)
-    }
-    const tables =
-      (res.json as { tables?: { tableReference: { tableId: string } }[] } | null)?.tables?.map(
-        (t) => t.tableReference.tableId
-      ) || []
-
-    const normPreferred = preferredBillingId ? preferredBillingId.replace(/-/g, '_').toUpperCase() : ''
-    const stdTables = tables.filter((t) => /^gcp_billing_export_v1_/i.test(t))
-    const resTables = tables.filter((t) => /^gcp_billing_export_resource_v1_/i.test(t))
-    const candidates = [...stdTables, ...resTables]
-
-    if (normPreferred) {
-      tableId = candidates.find((t) => t.toUpperCase().includes(normPreferred)) || ''
-    }
-    if (!tableId) {
-      tableId = candidates[0] || ''
-    }
-    if (!tableId) {
-      throw new Error(
-        `数据集 "${datasetId}" 中尚未生成 gcp_billing_export_v1_* 账单表（刚开启导出后通常需等待数小时由 Google 自动建表）`
-      )
+  if (!explicitTableId?.trim()) {
+    let pageToken = ''
+    for (let guard = 0; guard < 25; guard++) {
+      const listUrl =
+        `https://bigquery.googleapis.com/bigquery/v2/projects/${encodeURIComponent(projectId)}/datasets/${encodeURIComponent(datasetId)}/tables?maxResults=200` +
+        (pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : '')
+      const res = await httpsWithFallback(listUrl, { headers: { Authorization: `Bearer ${token}` } })
+      if (res.status === 404) {
+        throw new Error(`未找到 BigQuery 数据集 "${projectId}.${datasetId}"，请确认已在 GCP 结算导出中创建该数据集`)
+      }
+      if (res.status >= 400) {
+        const msg = (res.json as { error?: { message?: string } } | null)?.error?.message || res.text.slice(0, 200)
+        throw new Error(`访问 BigQuery 数据集失败 (${res.status}): ${msg}`)
+      }
+      const payload = res.json as {
+        tables?: { tableReference: { tableId: string } }[]
+        nextPageToken?: string
+      } | null
+      for (const t of payload?.tables || []) {
+        if (t.tableReference?.tableId) allTables.push(t.tableReference.tableId)
+      }
+      if (!payload?.nextPageToken) break
+      pageToken = payload.nextPageToken
     }
   }
+
+  const tableId = selectBillingExportTable(allTables, explicitTableId, preferredBillingId)
 
   // Fetch table schema to verify credits.type existence
   const metaUrl = `https://bigquery.googleapis.com/bigquery/v2/projects/${encodeURIComponent(projectId)}/datasets/${encodeURIComponent(datasetId)}/tables/${encodeURIComponent(tableId)}`
@@ -271,17 +300,18 @@ async function discoverBillingTable(
   const schemaFields = (metaRes.json as { schema?: { fields?: BqField[] } } | null)?.schema?.fields || []
   const creditsField = schemaFields.find((f) => f.name === 'credits')
   const hasCreditType = Boolean(creditsField?.fields?.some((sub) => sub.name === 'type'))
-
-  const m = /_([0-9A-F]{6}_[0-9A-F]{6}_[0-9A-F]{6})$/i.exec(tableId)
-  const inferredAccountId = m ? m[1].toUpperCase().replace(/_/g, '-') : undefined
+  const inferredAccountId = extractAccountIdFromTable(tableId)
 
   return { tableId, hasCreditType, inferredAccountId }
 }
 
 interface BqQueryResponse {
   jobComplete?: boolean
+  jobReference?: { projectId?: string; jobId?: string; location?: string }
+  pageToken?: string
   schema?: { fields: BqField[] }
   rows?: { f: { v: unknown }[] }[]
+  errors?: { message?: string }[]
   error?: { message?: string }
 }
 
@@ -296,20 +326,68 @@ async function runBqQuery(token: string, projectId: string, sql: string): Promis
     body: JSON.stringify({
       query: sql,
       useLegacySql: false,
-      timeoutMs: 22000
+      timeoutMs: 15000,
+      maxResults: 5000
     }),
-    timeoutMs: 28000
+    timeoutMs: 25000
   })
 
-  const data = res.json as BqQueryResponse | null
-  if (res.status >= 400 || data?.error) {
-    const msg = data?.error?.message || res.text.slice(0, 240) || `HTTP ${res.status}`
+  let data = res.json as BqQueryResponse | null
+  if (res.status >= 400 || !data || data.error || data.errors?.length) {
+    const msg = data?.error?.message || data?.errors?.[0]?.message || res.text.slice(0, 240) || `HTTP ${res.status}`
     throw new Error(`BigQuery 查询失败: ${msg}`)
   }
-  if (!data?.rows || !data.schema?.fields) return []
 
-  const fields = data.schema.fields
-  return data.rows.map((row) => {
+  const jobId = data.jobReference?.jobId
+  const location = data.jobReference?.location
+  const deadline = Date.now() + 65000
+
+  // Poll until BigQuery finishes executing the job if jobComplete === false
+  while (data.jobComplete === false) {
+    if (!jobId || Date.now() > deadline) {
+      throw new Error('BigQuery 查询任务执行超时（超过 65 秒仍未完成）')
+    }
+    const pollUrl =
+      `https://bigquery.googleapis.com/bigquery/v2/projects/${encodeURIComponent(projectId)}/queries/${encodeURIComponent(jobId)}?timeoutMs=10000&maxResults=5000` +
+      (location ? `&location=${encodeURIComponent(location)}` : '')
+    const pollRes = await httpsWithFallback(pollUrl, {
+      headers: { Authorization: `Bearer ${token}` },
+      timeoutMs: 20000
+    })
+    const pollData = pollRes.json as BqQueryResponse | null
+    if (pollRes.status >= 400 || !pollData || pollData.error || pollData.errors?.length) {
+      const msg =
+        pollData?.error?.message || pollData?.errors?.[0]?.message || pollRes.text.slice(0, 240) || `HTTP ${pollRes.status}`
+      throw new Error(`BigQuery 查询任务失败: ${msg}`)
+    }
+    data = pollData
+  }
+
+  const fields = data.schema?.fields
+  if (!fields) return []
+
+  const allRawRows = [...(data.rows || [])]
+  let pageToken = data.pageToken
+  let pageGuard = 0
+  while (pageToken && jobId && pageGuard++ < 30) {
+    const pageUrl =
+      `https://bigquery.googleapis.com/bigquery/v2/projects/${encodeURIComponent(projectId)}/queries/${encodeURIComponent(jobId)}?maxResults=5000&pageToken=${encodeURIComponent(pageToken)}` +
+      (location ? `&location=${encodeURIComponent(location)}` : '')
+    const pageRes = await httpsWithFallback(pageUrl, {
+      headers: { Authorization: `Bearer ${token}` },
+      timeoutMs: 20000
+    })
+    const pageData = pageRes.json as BqQueryResponse | null
+    if (pageRes.status >= 400 || !pageData || pageData.error || pageData.errors?.length) {
+      const msg =
+        pageData?.error?.message || pageData?.errors?.[0]?.message || pageRes.text.slice(0, 240) || `HTTP ${pageRes.status}`
+      throw new Error(`BigQuery 分页读取失败: ${msg}`)
+    }
+    if (pageData.rows?.length) allRawRows.push(...pageData.rows)
+    pageToken = pageData.pageToken
+  }
+
+  return allRawRows.map((row) => {
     const obj: Record<string, unknown> = {}
     fields.forEach((f, idx) => {
       obj[f.name] = row.f[idx]?.v ?? null
@@ -518,37 +596,23 @@ GROUP BY credit_name, credit_type, usage_date, inv_month, is_promo
   }
   const discoveredCredits = [...credMap.values()].sort((a, b) => b.allTimeApplied - a.allTimeApplied)
 
-  // Match configured CreditGrants against promo credit rows
+  // Waterfall allocation across configured CreditGrants (never double-counting the same credit slice)
   const todayIso = new Date().toISOString().slice(0, 10)
-  const promoRows = creditRows.filter((r) => Number(r.is_promo) === 1 && num(r.applied_amount) > 0)
+  const promoSlices = creditRows
+    .filter((r) => Number(r.is_promo) === 1 && num(r.applied_amount) > 0)
+    .map((r) => ({
+      creditName: str(r.credit_name, 'Credit'),
+      usageDate: str(r.usage_date),
+      appliedAmount: num(r.applied_amount)
+    }))
   const grants = cfg.creditGrants || []
-  const grantsBreakdown = grants.map((g: CreditGrant) => {
-    const filter = (g.creditFilter || '').trim().toLowerCase()
-    const baseDate = (g.baselineDate || '').trim()
-    let used = 0
-    for (const r of promoRows) {
-      if (baseDate && str(r.usage_date) < baseDate) continue
-      if (filter && !str(r.credit_name).toLowerCase().includes(filter)) continue
-      used += num(r.applied_amount)
-    }
-    const total = Math.max(0, Number(g.totalAmount) || 0)
-    const isExpired = Boolean(g.expiresAt && g.expiresAt < todayIso)
-    const remaining = isExpired ? 0 : Math.max(0, total - used)
-    return {
-      id: g.id,
-      name: g.name || '赠金',
-      total,
-      used: isExpired ? total : used,
-      remaining,
-      expiresAt: g.expiresAt || undefined
-    }
-  })
+  const grantsBreakdown = allocateCreditsWaterfall(grants, promoSlices, todayIso)
 
   const totalCreditGranted = grantsBreakdown.reduce((s, g) => s + g.total, 0)
   const totalCreditUsed =
     grantsBreakdown.length > 0
       ? grantsBreakdown.reduce((s, g) => s + Math.min(g.total, g.used), 0)
-      : promoRows.reduce((s, r) => s + num(r.applied_amount), 0)
+      : promoSlices.reduce((s, r) => s + r.appliedAmount, 0)
   const totalCreditRemaining = Math.max(0, totalCreditGranted - totalCreditUsed)
 
   if (monthNetCost > 0.05 && monthPromoDeduction < 0.01 && totalCreditRemaining > 0) {
@@ -563,18 +627,19 @@ GROUP BY credit_name, credit_type, usage_date, inv_month, is_promo
   const estimatedRunwayDays =
     dailyBurnRate7d > 0.005 && totalCreditRemaining > 0 ? Math.floor(totalCreditRemaining / dailyBurnRate7d) : null
 
-  const wantedAcctId = (cfg.billingAccountId || tableMeta.inferredAccountId || '').toUpperCase()
-  const matchedAcct =
-    accounts.find((a) => a.billingAccountId.toUpperCase() === wantedAcctId) ||
-    accounts[0] ||
-    (wantedAcctId
-      ? {
-          name: `billingAccounts/${wantedAcctId}`,
-          displayName: `结算账户 (${wantedAcctId})`,
-          open: true,
-          billingAccountId: wantedAcctId
-        }
-      : null)
+  // Strict account matching: never fall back to accounts[0] when wantedAcctId belongs to a different account
+  const wantedAcctId = (cfg.billingAccountId || tableMeta.inferredAccountId || '').trim().toUpperCase()
+  let matchedAcct: GcpBillingAccountInfo | null = null
+  if (wantedAcctId) {
+    matchedAcct = accounts.find((a) => a.billingAccountId.toUpperCase() === wantedAcctId) || {
+      name: `billingAccounts/${wantedAcctId}`,
+      displayName: `结算账户 (${wantedAcctId})`,
+      open: true,
+      billingAccountId: wantedAcctId
+    }
+  } else if (accounts.length === 1) {
+    matchedAcct = accounts[0]
+  }
 
   return {
     fetchedAt: Date.now(),
@@ -746,21 +811,22 @@ class BillingManager extends EventEmitter {
   }
 
   async saveConfig(cfg: GcpBillingConfig): Promise<{ config: GcpBillingConfig; summary: GcpBillingSummary | null }> {
-    if (cfg.serviceAccountJson) {
-      const sa = parseServiceAccount(cfg.serviceAccountJson)
-      cfg.serviceAccountEmail = sa.client_email
-      if (!cfg.projectId && sa.project_id) cfg.projectId = sa.project_id
+    const merged = store.setBilling(cfg)
+    if (merged.serviceAccountJson) {
+      const sa = parseServiceAccount(merged.serviceAccountJson)
+      merged.serviceAccountEmail = sa.client_email
+      if (!merged.projectId && sa.project_id) merged.projectId = sa.project_id
     } else {
-      cfg.serviceAccountEmail = undefined
+      merged.serviceAccountEmail = undefined
     }
 
-    store.setBilling(cfg)
+    store.setBilling(merged)
     this.scheduleTimer()
 
-    if (cfg.mode === 'unconfigured') {
+    if (merged.mode === 'unconfigured') {
       store.setBillingSummary(null)
       this.emit('summary', null)
-      return { config: cfg, summary: null }
+      return { config: store.billing, summary: null }
     }
 
     const summary = await this.refresh()

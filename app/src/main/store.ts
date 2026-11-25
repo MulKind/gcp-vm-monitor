@@ -2,6 +2,9 @@ import { app, safeStorage } from 'electron'
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'fs'
 import { join } from 'path'
 import type { GcpBillingConfig, GcpBillingSummary, Settings, VmConfig } from '@shared/types'
+import { mergeBillingSecrets, mergeVmSecrets, redactBilling, redactVm, sanitizeVmHost } from './coreLogic'
+
+export { mergeBillingSecrets, mergeVmSecrets, redactBilling, redactVm, sanitizeVmHost }
 
 interface StoreData {
   version: 1
@@ -34,6 +37,7 @@ function defaults(): StoreData {
     version: 1,
     settings: {
       proxy: defaultProxy(),
+      allowDirectFallback: false,
       browserUseProxy: true,
       closeToTray: true,
       metricsIntervalMs: 1000,
@@ -53,10 +57,21 @@ function defaults(): StoreData {
   }
 }
 
+export function isEncryptionSecure(): boolean {
+  if (!safeStorage.isEncryptionAvailable()) return false
+  const getBackend = (safeStorage as unknown as { getSelectedStorageBackend?: () => string }).getSelectedStorageBackend
+  if (typeof getBackend === 'function' && getBackend.call(safeStorage) === 'basic_text') {
+    return false
+  }
+  return true
+}
+
 function encrypt(v: string): string {
   if (!v) return v
-  if (safeStorage.isEncryptionAvailable()) return 'enc:' + safeStorage.encryptString(v).toString('base64')
-  return v
+  if (!isEncryptionSecure()) {
+    throw new Error('当前系统未启用安全凭据加密后端（DPAPI / Keychain / libsecret），拒绝明文保存敏感凭据')
+  }
+  return 'enc:' + safeStorage.encryptString(v).toString('base64')
 }
 
 function decrypt(v: string | undefined): string | undefined {
@@ -66,25 +81,6 @@ function decrypt(v: string | undefined): string | undefined {
   } catch {
     return undefined
   }
-}
-
-export function sanitizeVmHost(vm: VmConfig): VmConfig {
-  if (!vm.host) return vm
-  let h = vm.host.trim().replace(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//, '')
-  const slash = h.indexOf('/')
-  if (slash >= 0) h = h.slice(0, slash)
-  const at = h.lastIndexOf('@')
-  if (at >= 0) {
-    if (!vm.username) vm.username = h.slice(0, at)
-    h = h.slice(at + 1)
-  }
-  const colon = h.match(/^([^:]+):(\d+)$/)
-  if (colon) {
-    h = colon[1]
-    if (!vm.port || vm.port === 22) vm.port = Number(colon[2])
-  }
-  vm.host = h.trim()
-  return vm
 }
 
 class Store {
@@ -156,16 +152,22 @@ class Store {
     return this.data.vms
   }
 
+  get redactedVms(): VmConfig[] {
+    return this.data.vms.map(redactVm)
+  }
+
   getVm(id: string): VmConfig | undefined {
     return this.data.vms.find((v) => v.id === id)
   }
 
-  upsertVm(vm: VmConfig): void {
-    sanitizeVmHost(vm)
-    const i = this.data.vms.findIndex((v) => v.id === vm.id)
-    if (i >= 0) this.data.vms[i] = vm
-    else this.data.vms.push(vm)
+  upsertVm(vm: VmConfig): VmConfig {
+    const existing = this.getVm(vm.id)
+    const merged = mergeVmSecrets(vm, existing)
+    const i = this.data.vms.findIndex((v) => v.id === merged.id)
+    if (i >= 0) this.data.vms[i] = merged
+    else this.data.vms.push(merged)
     this.save()
+    return merged
   }
 
   patchVm(id: string, patch: Partial<VmConfig>): VmConfig | undefined {
@@ -174,6 +176,14 @@ class Store {
     Object.assign(vm, patch)
     this.save()
     return vm
+  }
+
+  tunnelPortsForVm(id: string): number[] {
+    const ports: number[] = []
+    for (const [k, p] of Object.entries(this.data.tunnelPorts)) {
+      if (k.startsWith(id + '|')) ports.push(p)
+    }
+    return ports
   }
 
   deleteVm(id: string): void {
@@ -199,9 +209,15 @@ class Store {
     return this.data.billing
   }
 
-  setBilling(cfg: GcpBillingConfig): void {
-    this.data.billing = cfg
+  get redactedBilling(): GcpBillingConfig {
+    return redactBilling(this.data.billing)
+  }
+
+  setBilling(cfg: GcpBillingConfig): GcpBillingConfig {
+    const merged = mergeBillingSecrets(cfg, this.data.billing)
+    this.data.billing = merged
     this.save()
+    return merged
   }
 
   get billingSummary(): GcpBillingSummary | null {

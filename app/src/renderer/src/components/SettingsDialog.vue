@@ -10,6 +10,7 @@ const f = reactive<Settings>(
     JSON.stringify(
       state.settings || {
         proxy: { type: 'http', host: '127.0.0.1', port: 10808 },
+        allowDirectFallback: false,
         browserUseProxy: true,
         closeToTray: true,
         metricsIntervalMs: 1000,
@@ -58,6 +59,11 @@ async function save(): Promise<void> {
             <input v-model.number="f.proxy.port" type="number" class="mono" placeholder="10808" />
           </div>
         </div>
+
+        <label v-if="f.proxy.type !== 'none'" class="row" style="cursor: pointer; color: var(--text)">
+          <input v-model="f.allowDirectFallback" type="checkbox" style="width: auto" />
+          代理连接失败时允许尝试直连（若要求严格保护本机真实出口 IP 请保持关闭）
+        </label>
 
         <label class="row" style="cursor: pointer; color: var(--text)">
           <input v-model="f.browserUseProxy" type="checkbox" style="width: auto" />

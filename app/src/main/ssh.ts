@@ -3,7 +3,9 @@ import { EventEmitter } from 'events'
 import { readFileSync } from 'fs'
 import { Client, type ConnectConfig, type ClientChannel } from 'ssh2'
 import type { ProxySettings, VmConfig } from '@shared/types'
-import { sanitizeVmHost } from './store'
+import { computeHostFingerprint, sanitizeVmHost, verifyOrPinHostKey } from './coreLogic'
+
+export { computeHostFingerprint, verifyOrPinHostKey }
 
 /** Open a raw TCP socket to host:port through an HTTP CONNECT or SOCKS5 proxy (or directly). */
 export function proxySocket(proxy: ProxySettings, host: string, port: number, timeoutMs = 15000): Promise<net.Socket> {
@@ -117,35 +119,59 @@ export class SshSession extends EventEmitter {
     super()
   }
 
-  async connect(proxy: ProxySettings): Promise<void> {
+  async connect(
+    proxy: ProxySettings,
+    opts: { allowDirectFallback?: boolean; onPinFingerprint?: (fp: string) => void } = {}
+  ): Promise<void> {
     const vm = sanitizeVmHost(this.vm)
     const useProxy: ProxySettings = isLoopback(vm.host) ? { ...proxy, type: 'none' } : proxy
     const attempts: ProxySettings[] =
-      useProxy.type !== 'none' ? [useProxy, { ...useProxy, type: 'none' }] : [useProxy]
+      useProxy.type !== 'none' && opts.allowDirectFallback ? [useProxy, { ...useProxy, type: 'none' }] : [useProxy]
 
     let lastErr: Error | null = null
     for (const p of attempts) {
       try {
-        await this.connectWithProxy(vm, p)
+        await this.connectWithProxy(vm, p, opts.onPinFingerprint)
         return
       } catch (e) {
         lastErr = e as Error
-        // If authentication failed, do not retry direct vs proxy
-        if (/authentication methods failed/i.test(lastErr.message)) break
+        // Never retry direct vs proxy on authentication failure or SSH host key mismatch
+        if (/authentication methods failed|主机公钥指纹不匹配/i.test(lastErr.message)) break
         this.client = new Client()
       }
     }
     throw lastErr || new Error('SSH 连接失败')
   }
 
-  private async connectWithProxy(vm: VmConfig, useProxy: ProxySettings): Promise<void> {
+  private async connectWithProxy(
+    vm: VmConfig,
+    useProxy: ProxySettings,
+    onPinFingerprint?: (fp: string) => void
+  ): Promise<void> {
     const sock = await proxySocket(useProxy, vm.host, vm.port || 22)
+    let mismatchError: Error | null = null
+    let pendingPin: string | null = null
+
     const cfg: ConnectConfig = {
       sock,
       username: vm.username,
       readyTimeout: 20000,
       keepaliveInterval: 15000,
-      keepaliveCountMax: 3
+      keepaliveCountMax: 3,
+      hostVerifier: ((key: Buffer | string) => {
+        const keyBuf = Buffer.isBuffer(key) ? key : Buffer.from(key, 'hex')
+        const check = verifyOrPinHostKey(vm.hostFingerprint, keyBuf)
+        if (!check.ok) {
+          mismatchError = new Error(
+            `SSH 主机公钥指纹不匹配（服务器可能已重装或存在中间人风险）！预期 ${vm.hostFingerprint}，实际 ${check.fingerprint}。若确认重装，请在编辑虚拟机→高级选项中重置指纹`
+          )
+          return false
+        }
+        if (check.shouldPin) {
+          pendingPin = check.fingerprint
+        }
+        return true
+      }) as ConnectConfig['hostVerifier']
     }
     if (vm.authType === 'key') {
       if (!vm.privateKeyPath) throw new Error('未设置私钥文件')
@@ -161,11 +187,15 @@ export class SshSession extends EventEmitter {
     await new Promise<void>((resolve, reject) => {
       const onErr = (e: Error): void => {
         sock.destroy()
-        reject(e)
+        reject(mismatchError || e)
       }
       this.client.once('ready', () => {
         this.client.removeListener('error', onErr)
         this.connected = true
+        if (pendingPin) {
+          vm.hostFingerprint = pendingPin
+          onPinFingerprint?.(pendingPin)
+        }
         resolve()
       })
       this.client.once('error', onErr)

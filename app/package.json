@@ -1,6 +1,6 @@
 {
   "name": "vmmon",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "GCP VM & service monitor (desktop)",
   "main": "./out/main/index.js",
   "author": "Klind",
@@ -9,6 +9,7 @@
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
+    "test": "node --test tests/core.test.ts",
     "typecheck": "vue-tsc --noEmit -p tsconfig.web.json && tsc --noEmit -p tsconfig.node.json",
     "dist": "electron-vite build && electron-builder --win --x64"
   },

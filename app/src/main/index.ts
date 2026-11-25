@@ -16,7 +16,8 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { randomUUID } from 'crypto'
 import { deflateSync } from 'zlib'
 import { utils as sshUtils } from 'ssh2'
-import { store } from './store'
+import { redactBilling, redactVm, store } from './store'
+import { buildSafeKeyFilename, isSafeHttpUrl } from './coreLogic'
 import { manager } from './manager'
 import { billingManager } from './gcpBilling'
 import type { AppSnapshot, CreditGrant, GcpBillingConfig, GeneratedKey, ServiceOverride, Settings, VmConfig } from '@shared/types'
@@ -244,8 +245,15 @@ function createWindow(): void {
 
   win.on('closed', () => (win = null))
   win.webContents.setWindowOpenHandler(({ url }) => {
-    void shell.openExternal(url)
+    if (isSafeHttpUrl(url)) void shell.openExternal(url)
     return { action: 'deny' }
+  })
+  win.webContents.on('will-navigate', (ev, url) => {
+    const devOrigin = process.env.ELECTRON_RENDERER_URL
+      ? new URL(process.env.ELECTRON_RENDERER_URL).origin
+      : null
+    if (devOrigin && url.startsWith(devOrigin)) return
+    ev.preventDefault()
   })
   if (process.env.ELECTRON_RENDERER_URL) void win.loadURL(process.env.ELECTRON_RENDERER_URL)
   else void win.loadFile(join(__dirname, '../renderer/index.html'))
@@ -277,17 +285,29 @@ async function applyProxy(ses: Electron.Session, force = false): Promise<void> {
 const knownPartitions = new Set<string>()
 
 app.on('web-contents-created', (_e, contents: WebContents) => {
-  contents.on('will-attach-webview', (_ev, webPreferences, params) => {
+  contents.on('will-attach-webview', (ev, webPreferences, params) => {
     delete webPreferences.preload
     webPreferences.nodeIntegration = false
     webPreferences.contextIsolation = true
     webPreferences.sandbox = true
+    if (!params.src || !isSafeHttpUrl(params.src)) {
+      ev.preventDefault()
+      return
+    }
     if (params.partition) knownPartitions.add(params.partition)
   })
   if (contents.getType() === 'webview') {
     void applyProxy(contents.session)
+    contents.on('will-navigate', (ev, url) => {
+      if (!isSafeHttpUrl(url)) ev.preventDefault()
+    })
+    contents.on('will-redirect', (ev, url) => {
+      if (!isSafeHttpUrl(url)) ev.preventDefault()
+    })
     contents.setWindowOpenHandler(({ url }) => {
-      send('webview:new-window', { webContentsId: contents.id, url })
+      if (isSafeHttpUrl(url)) {
+        send('webview:new-window', { webContentsId: contents.id, url })
+      }
       return { action: 'deny' }
     })
   }
@@ -311,19 +331,19 @@ app.on('certificate-error', (event, _wc, url, _err, _cert, callback) => {
 
 function registerIpc(): void {
   ipcMain.handle('app:snapshot', (): AppSnapshot => ({
-    vms: store.vms,
+    vms: store.redactedVms,
     settings: store.settings,
     statuses: manager.statuses(),
     infos: manager.infos(),
     services: manager.servicesAll(),
-    billingConfig: store.billing,
+    billingConfig: store.redactedBilling,
     billingSummary: store.billingSummary
   }))
 
   ipcMain.handle('billing:save', async (_e, cfg: GcpBillingConfig) => {
     const res = await billingManager.saveConfig(cfg)
     updateTrayMenu()
-    return res
+    return { config: redactBilling(res.config), summary: res.summary }
   })
 
   ipcMain.handle('billing:refresh', async () => {
@@ -335,7 +355,7 @@ function registerIpc(): void {
   ipcMain.handle('billing:syncConsole', async (_e, payload: { grants: CreditGrant[]; currency?: string }) => {
     const res = await billingManager.syncConsoleCredits(payload)
     updateTrayMenu()
-    return res
+    return { config: redactBilling(res.config), summary: res.summary }
   })
 
   ipcMain.handle('dialog:pickJson', async () => {
@@ -351,9 +371,9 @@ function registerIpc(): void {
 
   ipcMain.handle('vm:save', (_e, vm: VmConfig) => {
     if (!vm.id) vm.id = randomUUID()
-    manager.saveVm(vm)
+    const redacted = manager.saveVm(vm)
     updateTrayMenu()
-    return vm
+    return redacted
   })
   ipcMain.handle('vm:delete', (_e, id: string) => {
     manager.deleteVm(id)
@@ -385,15 +405,21 @@ function registerIpc(): void {
     else delete overrides[svcId]
     const updated = store.patchVm(vmId, { serviceOverrides: overrides })!
     manager.rt(vmId).vm = updated
-    send('vm:config', updated)
-    return updated
+    const redacted = redactVm(updated)
+    send('vm:config', redacted)
+    return redacted
   })
 
   ipcMain.handle('settings:save', async (_e, s: Settings) => {
     const old = store.settings
     store.setSettings(s)
     for (const p of knownPartitions) await applyProxy(session.fromPartition(p), true)
-    if (JSON.stringify(old.proxy) !== JSON.stringify(s.proxy) || old.metricsIntervalMs !== s.metricsIntervalMs || old.servicesIntervalMs !== s.servicesIntervalMs)
+    if (
+      JSON.stringify(old.proxy) !== JSON.stringify(s.proxy) ||
+      old.allowDirectFallback !== s.allowDirectFallback ||
+      old.metricsIntervalMs !== s.metricsIntervalMs ||
+      old.servicesIntervalMs !== s.servicesIntervalMs
+    )
       manager.restartAll()
     return s
   })
@@ -410,15 +436,16 @@ function registerIpc(): void {
   ipcMain.handle('key:generate', (_e, username: string): GeneratedKey => {
     const dir = join(app.getPath('userData'), 'keys')
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
-    const base = join(dir, `vmmon_ed25519_${username || 'user'}`)
-    const kp = sshUtils.generateKeyPairSync('ed25519', { comment: username })
-    writeFileSync(base, kp.private, { mode: 0o600 })
-    writeFileSync(base + '.pub', kp.public + '\n')
+    const safeComment = (username || 'user').replace(/[\r\n\0]/g, '').trim()
+    const base = join(dir, buildSafeKeyFilename(safeComment))
+    const kp = sshUtils.generateKeyPairSync('ed25519', { comment: safeComment })
+    writeFileSync(base, kp.private, { flag: 'wx', mode: 0o600 })
+    writeFileSync(base + '.pub', kp.public + '\n', { flag: 'wx' })
     return { privateKeyPath: base, publicKey: kp.public.trim() }
   })
 
   ipcMain.handle('shell:open', (_e, url: string) => {
-    if (/^https?:\/\//i.test(url)) return shell.openExternal(url)
+    if (isSafeHttpUrl(url)) return shell.openExternal(url)
     return undefined
   })
 
@@ -426,6 +453,7 @@ function registerIpc(): void {
     send('vm:status', s)
     updateTrayMenu()
   })
+  manager.on('vm-updated', (vm) => send('vm:config', vm))
   manager.on('info', (id, info) => send('vm:info', id, info))
   manager.on('metrics', (id, m) => send('vm:metrics', id, m))
   manager.on('services', (id, list) => send('vm:services', id, list))

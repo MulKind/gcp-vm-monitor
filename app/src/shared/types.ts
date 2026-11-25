@@ -10,6 +10,8 @@ export interface ProxySettings {
 
 export interface Settings {
   proxy: ProxySettings
+  /** Allow falling back to direct connection when the configured proxy fails */
+  allowDirectFallback: boolean
   /** Use the proxy for embedded browser when opening services via public URL/domain */
   browserUseProxy: boolean
   /** Minimize to system tray instead of quitting when clicking the window close button */
@@ -31,8 +33,17 @@ export interface VmConfig {
   privateKeyPath?: string
   passphrase?: string
   password?: string
-  /** Agent bearer token (filled after install) */
+  /** Agent bearer token (filled after install, main-process only; redacted in IPC) */
   agentToken?: string
+  /** Redacted DTO indicators sent to renderer instead of raw secrets */
+  hasPassword?: boolean
+  hasPassphrase?: boolean
+  hasAgentToken?: boolean
+  clearPassword?: boolean
+  clearPassphrase?: boolean
+  clearAgentToken?: boolean
+  /** Pinned SSH host public key fingerprint (SHA256:base64); empty string resets pin */
+  hostFingerprint?: string
   agentPort: number
   /** GCP meta (optional, informational for now) */
   gcpProject?: string
@@ -210,8 +221,10 @@ export interface CreditGrant {
 
 export interface GcpBillingConfig {
   mode: 'unconfigured' | 'bigquery' | 'demo'
-  /** Service Account JSON key content (encrypted at rest in store) */
+  /** Service Account JSON key content (encrypted at rest in main process; redacted over IPC) */
   serviceAccountJson?: string
+  hasServiceAccountKey?: boolean
+  clearServiceAccountKey?: boolean
   serviceAccountEmail?: string
   /** GCP Project ID where the BigQuery dataset resides */
   projectId: string
